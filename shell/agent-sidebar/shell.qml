@@ -9,15 +9,22 @@ import Quickshell.Widgets
 ShellRoot {
   id: shell
 
-  readonly property int railWidth: 250
+  readonly property int workspacePaneWidth: 250
+  readonly property int agentPaneWidth: 360
+  readonly property int paneDividerWidth: 1
+  readonly property int railWidth: workspacePaneWidth + paneDividerWidth + agentPaneWidth
+  readonly property int collapsedRailWidth: 44
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/lnx"
   readonly property string stateFile: stateDir + "/workspaces.json"
 
   property var annotations: ({})
+  property var agentEvents: []
   property var workspaceRows: []
   property var windowRows: []
   property int expandedWorkspaceId: -1
+  property bool sidebarCollapsed: false
   property bool stateReady: false
+  property string agentStatus: "starting"
 
   function workspaceKey(workspaceId) {
     return "niri:workspace:" + workspaceId;
@@ -37,6 +44,51 @@ ShellRoot {
   function annotationFor(workspaceId) {
     const entry = annotations[workspaceKey(workspaceId)];
     return entry && entry.annotation ? entry.annotation : "";
+  }
+
+  function appendAgentEvent(kind, title, body) {
+    const next = agentEvents.slice();
+    next.push({
+      kind: kind,
+      title: title,
+      body: body,
+      time: Qt.formatTime(new Date(), "HH:mm")
+    });
+    agentEvents = next;
+  }
+
+  function handleAgentLine(line) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+
+    try {
+      const message = JSON.parse(trimmed);
+      if (message.type === "status") {
+        agentStatus = message.status || "unknown";
+      } else if (message.type === "event") {
+        appendAgentEvent(message.kind || "system", message.title || "Codex", message.body || "");
+      }
+    } catch (error) {
+      appendAgentEvent("stderr", "codex-agent", trimmed);
+    }
+  }
+
+  function sendAgentPrompt(prompt) {
+    const trimmed = prompt.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+
+    if (!codexAgent.running) {
+      codexAgent.running = true;
+    }
+
+    codexAgent.write(JSON.stringify({
+      type: "prompt",
+      text: trimmed
+    }) + "\n");
   }
 
   function windowsForWorkspace(workspaceId) {
@@ -162,12 +214,26 @@ ShellRoot {
     workspaceRows = rows;
   }
 
-  function nextWorkspaceIndex() {
-    let maxIdx = 0;
+  function bottomWorkspaceIndex() {
+    let targetOutput = "";
     for (let i = 0; i < workspaceRows.length; i++) {
-      maxIdx = Math.max(maxIdx, workspaceRows[i].idx);
+      if (workspaceRows[i].focused || workspaceRows[i].active) {
+        targetOutput = workspaceRows[i].output;
+        break;
+      }
     }
-    return maxIdx + 1;
+
+    let maxIdx = 1;
+    for (let i = 0; i < workspaceRows.length; i++) {
+      if (targetOutput.length === 0 || workspaceRows[i].output === targetOutput) {
+        maxIdx = Math.max(maxIdx, workspaceRows[i].idx);
+      }
+    }
+    return maxIdx;
+  }
+
+  function focusBottomWorkspace() {
+    Niri.dispatch(["focus-workspace", String(bottomWorkspaceIndex())]);
   }
 
   function focusWorkspace(workspace) {
@@ -176,6 +242,25 @@ ShellRoot {
 
   function focusWindow(windowRow) {
     Niri.dispatch(["focus-window", "--id", String(windowRow.id)]);
+  }
+
+  function showSidebar() {
+    sidebarCollapsed = false;
+    scheduleRecenter();
+  }
+
+  function hideSidebar() {
+    sidebarCollapsed = true;
+    scheduleRecenter();
+  }
+
+  function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    scheduleRecenter();
+  }
+
+  function scheduleRecenter() {
+    recenterTimer.restart();
   }
 
   function setAnnotation(workspaceId, annotation) {
@@ -202,6 +287,14 @@ ShellRoot {
     Niri.refreshOutputs();
     Niri.refreshWorkspaces();
     Niri.refreshWindows();
+    agentEvents = [
+      {
+        kind: "system",
+        title: "Codex ACP",
+        body: "Starting Codex agent...",
+        time: Qt.formatTime(new Date(), "HH:mm")
+      }
+    ];
     Qt.callLater(refreshState);
   }
 
@@ -216,6 +309,13 @@ ShellRoot {
     function onFocusedWindowChanged() {
       refreshState();
     }
+  }
+
+  Timer {
+    id: recenterTimer
+    interval: 120
+    repeat: false
+    onTriggered: Niri.dispatch(["expand-column-to-available-width"])
   }
 
   FileView {
@@ -241,15 +341,66 @@ ShellRoot {
     }
   }
 
+  IpcHandler {
+    target: "sidebar"
+
+    function toggle() {
+      shell.toggleSidebar();
+    }
+
+    function reveal() {
+      shell.showSidebar();
+    }
+
+    function hide() {
+      shell.hideSidebar();
+    }
+
+  }
+
+  Process {
+    id: codexAgent
+
+    command: ["node", "/home/jettc/osdev/tic-shell/bin/tic-codex-agent"]
+    workingDirectory: Quickshell.env("HOME") || "/home/jettc"
+    stdinEnabled: true
+    running: false
+    environment: ({
+      "HOME": Quickshell.env("HOME") || "/home/jettc",
+      "PATH": "/run/current-system/sw/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.local/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.bun/bin:" + (Quickshell.env("PATH") || ""),
+      "TIC_CODEX_WORKDIR": Quickshell.env("HOME") || "/home/jettc"
+    })
+
+    stdout: SplitParser {
+      onRead: data => shell.handleAgentLine(data)
+    }
+
+    stderr: SplitParser {
+      onRead: data => {
+        const trimmed = data.trim();
+        if (trimmed.length > 0) {
+          shell.appendAgentEvent("stderr", "codex-agent", trimmed);
+        }
+      }
+    }
+
+    onStarted: shell.agentStatus = "starting"
+    onExited: (exitCode, exitStatus) => {
+      shell.agentStatus = "stopped";
+      shell.appendAgentEvent("system", "Codex agent stopped", "exit " + exitCode);
+    }
+  }
+
   PanelWindow {
     id: panel
 
     color: "#20242c"
-    implicitWidth: shell.railWidth
+    implicitWidth: shell.sidebarCollapsed ? shell.collapsedRailWidth : shell.railWidth
 
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.namespace: "tic-shell-agent-sidebar"
-    WlrLayershell.exclusionMode: ExclusionMode.Auto
+    WlrLayershell.exclusionMode: ExclusionMode.Normal
+    WlrLayershell.exclusiveZone: shell.sidebarCollapsed ? shell.collapsedRailWidth : shell.railWidth
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
     anchors {
@@ -264,69 +415,106 @@ ShellRoot {
       border.color: "#8bd5ca"
       border.width: 1
 
-      Column {
+      Row {
         anchors.fill: parent
-        anchors.margins: 12
-        spacing: 10
+        spacing: 0
 
-        Row {
-          width: parent.width
-          height: 32
-          spacing: 8
+        Item {
+          id: workspacePane
 
-          Text {
-            width: parent.width - addWorkspaceButton.width - parent.spacing
-            height: parent.height
-            color: "#cad3f5"
-            font.pixelSize: 17
-            font.weight: Font.DemiBold
-            verticalAlignment: Text.AlignVCenter
-            text: "Workspaces"
-            elide: Text.ElideRight
-          }
-
-          Rectangle {
-            id: addWorkspaceButton
-            width: 32
-            height: 32
-            radius: 6
-            color: addWorkspaceMouse.containsMouse ? "#3a4050" : "#2b303b"
-            border.color: "#596173"
-
-            Text {
-              anchors.centerIn: parent
-              color: "#8bd5ca"
-              font.pixelSize: 22
-              text: "+"
-            }
-
-            MouseArea {
-              id: addWorkspaceMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              onClicked: Niri.dispatch(["focus-workspace", String(shell.nextWorkspaceIndex())])
-            }
-          }
-        }
-
-        Flickable {
-          id: workspaceScroller
-          width: parent.width
-          height: parent.height - y
-          clip: true
-          contentWidth: width
-          contentHeight: workspaceColumn.height
+          width: shell.sidebarCollapsed ? shell.collapsedRailWidth : shell.workspacePaneWidth
+          height: parent.height
 
           Column {
-            id: workspaceColumn
-            width: workspaceScroller.width
-            spacing: 8
+            anchors.fill: parent
+            anchors.margins: shell.sidebarCollapsed ? 6 : 12
+            spacing: 10
 
-            Repeater {
-              model: shell.workspaceRows
+            Row {
+              width: parent.width
+              height: 32
+              spacing: shell.sidebarCollapsed ? 0 : 8
 
               Rectangle {
-                id: card
+                id: collapseSidebarButton
+                width: 32
+                height: 32
+                radius: 6
+                color: collapseSidebarMouse.containsMouse ? "#3a4050" : "#2b303b"
+                border.color: "#596173"
+
+                Text {
+                  anchors.centerIn: parent
+                  color: "#8bd5ca"
+                  font.pixelSize: 18
+                  font.weight: Font.DemiBold
+                  text: shell.sidebarCollapsed ? ">" : "<"
+                }
+
+                MouseArea {
+                  id: collapseSidebarMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: shell.toggleSidebar()
+                }
+              }
+
+              Text {
+                visible: !shell.sidebarCollapsed
+                width: parent.width - collapseSidebarButton.width - addWorkspaceButton.width - parent.spacing * 2
+                height: parent.height
+                color: "#cad3f5"
+                font.pixelSize: 17
+                font.weight: Font.DemiBold
+                verticalAlignment: Text.AlignVCenter
+                text: "Workspaces"
+                elide: Text.ElideRight
+              }
+
+              Rectangle {
+                id: addWorkspaceButton
+                visible: !shell.sidebarCollapsed
+                width: 32
+                height: 32
+                radius: 6
+                color: addWorkspaceMouse.containsMouse ? "#3a4050" : "#2b303b"
+                border.color: "#596173"
+
+                Text {
+                  anchors.centerIn: parent
+                  color: "#8bd5ca"
+                  font.pixelSize: 22
+                  text: "+"
+                }
+
+                MouseArea {
+                  id: addWorkspaceMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: shell.focusBottomWorkspace()
+                }
+              }
+            }
+
+            Flickable {
+              id: workspaceScroller
+              visible: !shell.sidebarCollapsed
+              width: parent.width
+              height: parent.height - y
+              clip: true
+              contentWidth: width
+              contentHeight: workspaceColumn.height
+
+              Column {
+                id: workspaceColumn
+                width: workspaceScroller.width
+                spacing: 8
+
+                Repeater {
+                  model: shell.workspaceRows
+
+                  Rectangle {
+                    id: card
 
                 readonly property var workspace: modelData
                 readonly property var workspaceWindows: workspace.windows || []
@@ -338,16 +526,18 @@ ShellRoot {
                 width: workspaceColumn.width
                 height: 58 + (appBadgeRow.visible ? appBadgeRow.height + 7 : 0) + (expanded ? expandedWindowListHeight + 8 : 0)
                 radius: 7
-                color: workspace.focused ? "#334044" : (cardMouse.containsMouse ? "#2d3340" : "#252a34")
+                color: workspace.focused ? "#334044" : (cardHover.hovered ? "#2d3340" : "#252a34")
                 border.color: workspace.urgent ? "#ed8796" : (workspace.focused ? "#8bd5ca" : "#3a4050")
                 border.width: workspace.focused ? 2 : 1
 
-                MouseArea {
-                  id: cardMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
+                HoverHandler {
+                  id: cardHover
+                }
+
+                TapHandler {
                   acceptedButtons: Qt.LeftButton
-                  onClicked: {
+                  gesturePolicy: TapHandler.ReleaseWithinBounds
+                  onTapped: {
                     if (!card.editing) {
                       shell.focusWorkspace(card.workspace);
                     }
@@ -486,7 +676,7 @@ ShellRoot {
                         width: windowList.width
                         height: 28
                         radius: 5
-                        color: win.focused ? "#3d4b4f" : (windowMouse.containsMouse ? "#303642" : "#272d37")
+                        color: win.focused ? "#3d4b4f" : (windowHover.hovered ? "#303642" : "#272d37")
                         border.color: win.focused ? "#8bd5ca" : "#3a4050"
 
                         Row {
@@ -533,12 +723,221 @@ ShellRoot {
                           }
                         }
 
-                        MouseArea {
-                          id: windowMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          onClicked: shell.focusWindow(win)
+                        HoverHandler {
+                          id: windowHover
                         }
+
+                        TapHandler {
+                          acceptedButtons: Qt.LeftButton
+                          gesturePolicy: TapHandler.ReleaseWithinBounds
+                          onTapped: shell.focusWindow(win)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+          }
+        }
+
+        Rectangle {
+          visible: !shell.sidebarCollapsed
+          width: shell.paneDividerWidth
+          height: parent.height
+          color: "#3a4050"
+        }
+
+        Item {
+          id: agentPane
+
+          visible: !shell.sidebarCollapsed
+          width: shell.agentPaneWidth
+          height: parent.height
+
+          Column {
+            anchors.fill: parent
+            anchors.margins: 12
+            spacing: 10
+
+            Column {
+              width: parent.width
+              height: 40
+              spacing: 3
+
+              Text {
+                width: parent.width
+                height: 20
+                color: "#cad3f5"
+                font.pixelSize: 17
+                font.weight: Font.DemiBold
+                text: "Codex"
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                height: 16
+                color: shell.agentStatus === "error" || shell.agentStatus === "stopped" ? "#ed8796" : (shell.agentStatus === "thinking" ? "#eed49f" : "#8bd5ca")
+                font.pixelSize: 12
+                text: shell.agentStatus
+                elide: Text.ElideRight
+              }
+            }
+
+            Flickable {
+              id: agentTranscript
+              width: parent.width
+              height: parent.height - y - agentInputBox.height - 10
+              clip: true
+              contentWidth: width
+              contentHeight: agentEventColumn.height
+
+              Column {
+                id: agentEventColumn
+                width: agentTranscript.width
+                spacing: 8
+
+                Repeater {
+                  model: shell.agentEvents
+
+                  Rectangle {
+                    readonly property bool isUser: modelData.kind === "user"
+                    readonly property bool isTool: modelData.kind === "tool"
+                    readonly property bool isPermission: modelData.kind === "permission"
+
+                    width: parent.width
+                    height: Math.max(58, eventBody.implicitHeight + 36)
+                    radius: 7
+                    color: isTool ? "#26333b" : (isPermission ? "#332f3c" : (isUser ? "#303642" : "#252a34"))
+                    border.color: isTool ? "#8aadf4" : (isPermission ? "#c6a0f6" : "#3a4050")
+
+                    Column {
+                      anchors.fill: parent
+                      anchors.margins: 9
+                      spacing: 5
+
+                      Row {
+                        width: parent.width
+                        height: 15
+                        spacing: 6
+
+                        Text {
+                          width: parent.width - eventTime.width - parent.spacing
+                          height: parent.height
+                          color: isTool ? "#8aadf4" : (isPermission ? "#c6a0f6" : "#cad3f5")
+                          font.pixelSize: 12
+                          font.weight: Font.DemiBold
+                          text: modelData.title
+                          elide: Text.ElideRight
+                        }
+
+                        Text {
+                          id: eventTime
+                          width: 38
+                          height: parent.height
+                          color: "#7f8797"
+                          font.pixelSize: 11
+                          horizontalAlignment: Text.AlignRight
+                          text: modelData.time
+                        }
+                      }
+
+                      Text {
+                        id: eventBody
+                        width: parent.width
+                        color: "#b8c0d6"
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                        text: modelData.body
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              id: agentInputBox
+              width: parent.width
+              height: 76
+              radius: 7
+              color: "#252a34"
+              border.color: agentPromptInput.activeFocus ? "#8bd5ca" : "#3a4050"
+
+              Column {
+                anchors.fill: parent
+                anchors.margins: 9
+                spacing: 7
+
+                TextInput {
+                  id: agentPromptInput
+                  width: parent.width
+                  height: 26
+                  color: "#ffffff"
+                  selectedTextColor: "#181c22"
+                  selectionColor: "#8bd5ca"
+                  font.pixelSize: 13
+                  clip: true
+                  selectByMouse: true
+                  verticalAlignment: TextInput.AlignVCenter
+                  onAccepted: {
+                    shell.sendAgentPrompt(text);
+                    text = "";
+                  }
+
+                  Text {
+                    anchors.fill: parent
+                    visible: agentPromptInput.text.length === 0 && !agentPromptInput.activeFocus
+                    color: "#697284"
+                    font.pixelSize: 13
+                    verticalAlignment: Text.AlignVCenter
+                    text: "ask Codex"
+                    elide: Text.ElideRight
+                  }
+                }
+
+                Row {
+                  width: parent.width
+                  height: 24
+                  spacing: 8
+
+                  Text {
+                    width: parent.width - sendPromptButton.width - parent.spacing
+                    height: parent.height
+                    color: "#7f8797"
+                    font.pixelSize: 11
+                    verticalAlignment: Text.AlignVCenter
+                    text: "All actions allowed"
+                    elide: Text.ElideRight
+                  }
+
+                  Rectangle {
+                    id: sendPromptButton
+                    width: 64
+                    height: 24
+                    radius: 6
+                    color: sendPromptMouse.containsMouse ? "#3d4b4f" : "#2b303b"
+                    border.color: "#8bd5ca"
+
+                    Text {
+                      anchors.centerIn: parent
+                      color: "#cad3f5"
+                      font.pixelSize: 12
+                      font.weight: Font.DemiBold
+                      text: "Send"
+                    }
+
+                    MouseArea {
+                      id: sendPromptMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      onClicked: {
+                        shell.sendAgentPrompt(agentPromptInput.text);
+                        agentPromptInput.text = "";
                       }
                     }
                   }

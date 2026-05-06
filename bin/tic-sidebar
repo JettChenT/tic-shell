@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:-toggle}"
+config_path="/home/jettc/osdev/tic-shell/shell/agent-sidebar"
+fallback_qs="/nix/store/iyi8sawnx7w04rq2sva9mxl7bm1xfkjd-quickshell-2026-05-03_d3e26cc/bin/qs"
+
+if command -v qs >/dev/null 2>&1; then
+  qs_bin="$(command -v qs)"
+elif command -v quickshell >/dev/null 2>&1; then
+  qs_bin="$(command -v quickshell)"
+elif command -v noctalia-shell >/dev/null 2>&1; then
+  qs_bin="$(command -v noctalia-shell)"
+elif [[ -x "$fallback_qs" ]]; then
+  qs_bin="$fallback_qs"
+else
+  echo "tic-sidebar: could not find qs, quickshell, or noctalia-shell" >&2
+  exit 127
+fi
+
+case "$action" in
+  start)
+    exec "$qs_bin" -p "$config_path" --daemonize --no-color
+    ;;
+  toggle|show|hide)
+    if [[ "$action" == "show" ]]; then
+      action="reveal"
+    fi
+    exec "$qs_bin" ipc -p "$config_path" call sidebar "$action"
+    ;;
+  *)
+    echo "usage: tic-sidebar [start|toggle|show|hide]" >&2
+    exit 64
+    ;;
+esac
