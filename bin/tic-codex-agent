@@ -1,28 +1,779 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { createInterface } from "node:readline";
 
-const cwd = process.env.TIC_CODEX_WORKDIR || process.env.HOME || "/home/jettc";
+const cwd = path.resolve(process.env.TIC_CODEX_WORKDIR || process.env.HOME || "/home/jettc");
 const adapterCommand = process.env.TIC_CODEX_ACP_COMMAND || "";
-let nextId = 1;
-let sessionId = "";
-let initialized = false;
-let sessionReady = false;
-let promptBusy = false;
-const pendingPrompts = [];
-const pending = new Map();
-const tools = new Map();
 
 function emit(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
+function createClient({ child, emitMessage = emit, workspaceRoot = cwd }) {
+let nextId = 1;
+let nextEntryId = 1;
+let initialized = false;
+let agentTitle = "Codex";
+const pending = new Map();
+let activeWorkspaceKey = "workspace:default";
+let activeWorkspaceTitle = "Workspace";
+const workspaces = new Map();
+const sessionsById = new Map();
+const localCommands = [
+  { name: "clear", description: "Clear this workspace session" },
+  { name: "new", description: "Start a new session for this workspace" },
+  { name: "cancel", description: "Cancel the running turn" },
+  { name: "help", description: "Show available slash commands" },
+];
+
+function createWorkspace(key = activeWorkspaceKey, title = activeWorkspaceTitle) {
+  return {
+    key,
+    title,
+    sessionId: "",
+    sessionReady: false,
+    sessionStarting: false,
+    promptBusy: false,
+    thinkingEntryId: "",
+    lastLocalUserPrompt: "",
+    pendingPrompts: [],
+    entries: [],
+    tools: new Map(),
+    availableCommands: [],
+  };
+}
+
+function workspace(key = activeWorkspaceKey) {
+  if (!workspaces.has(key)) {
+    workspaces.set(key, createWorkspace(key, key));
+  }
+  return workspaces.get(key);
+}
+
+function workspaceForSession(sessionId) {
+  return sessionsById.get(sessionId) || workspace();
+}
+
+function sendToUi(message) {
+  emitMessage(message);
+}
+
 function status(text) {
-  emit({ type: "status", status: text });
+  sendToUi({ type: "status", status: text, workspaceKey: activeWorkspaceKey });
+}
+
+function emitWorkspace() {
+  const current = workspace();
+  sendToUi({
+    type: "workspace",
+    key: current.key,
+    title: current.title,
+    hasSession: Boolean(current.sessionId),
+    commands: commandList(current),
+  });
+}
+
+function snapshot(state = workspace()) {
+  if (state.key !== activeWorkspaceKey) {
+    return;
+  }
+  sendToUi({ type: "snapshot", events: state.entries, workspaceKey: state.key });
+  emitWorkspace();
+}
+
+function appendEntry(state, kind, title, body = "", id = "") {
+  const entry = {
+    id: id || `${kind}:${nextEntryId++}`,
+    kind,
+    title,
+    body,
+    time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
+  };
+  state.entries.push(entry);
+  snapshot(state);
+  return entry;
+}
+
+function removeEntry(state, id) {
+  if (!id) {
+    return;
+  }
+  const nextEntries = state.entries.filter(entry => entry.id !== id);
+  if (nextEntries.length !== state.entries.length) {
+    state.entries = nextEntries;
+    snapshot(state);
+  }
+}
+
+function replaceEntry(state, id, kind, title, body = "") {
+  const index = state.entries.findIndex(entry => entry.id === id);
+  if (index >= 0) {
+    state.entries[index] = {
+      ...state.entries[index],
+      kind,
+      title,
+      body,
+      time: state.entries[index].time,
+    };
+  } else {
+    state.entries.push({
+      id,
+      kind,
+      title,
+      body,
+      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
+    });
+  }
+  snapshot(state);
+}
+
+function appendOrMergeStream(state, kind, title, body) {
+  clearThinking(state);
+  const previous = state.entries[state.entries.length - 1];
+  if (previous && previous.kind === kind && previous.title === title) {
+    previous.body = `${previous.body || ""}${body}`;
+    snapshot(state);
+  } else {
+    appendEntry(state, kind, title, body);
+  }
 }
 
 function event(kind, title, body = "") {
-  emit({ type: "event", kind, title, body });
+  appendEntry(workspace(), kind, title, body);
+}
+
+function showThinking(state) {
+  clearThinking(state);
+  const entry = appendEntry(state, "thinking", "Thinking", "", `thinking:${state.key}`);
+  state.thinkingEntryId = entry.id;
+}
+
+function clearThinking(state) {
+  if (state.thinkingEntryId) {
+    const id = state.thinkingEntryId;
+    state.thinkingEntryId = "";
+    removeEntry(state, id);
+  }
+}
+
+function jsonrpcError(id, code, message, data) {
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } })}\n`);
+}
+
+function acpError(code, message, data) {
+  const err = new Error(message);
+  err.code = code;
+  err.data = data;
+  return err;
+}
+
+function supportedClientCapabilities() {
+  return {
+    fs: {
+      readTextFile: true,
+      writeTextFile: true,
+    },
+    meta: {
+      "tic-shell": true,
+    },
+  };
+}
+
+function resolveWorkspacePath(requestPath) {
+  if (typeof requestPath !== "string" || requestPath.trim().length === 0) {
+    throw acpError(-32602, "Missing file path");
+  }
+
+  const root = path.resolve(workspaceRoot);
+  const absolute = path.resolve(root, requestPath);
+  const relative = path.relative(root, absolute);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw acpError(-32602, "Path is outside TIC_CODEX_WORKDIR", requestPath);
+  }
+  return absolute;
+}
+
+function applyLineLimit(content, line, limit) {
+  if (line === undefined && limit === undefined) {
+    return content;
+  }
+
+  const start = Math.max(0, Number(line || 1) - 1);
+  const maxLines = limit === undefined ? undefined : Math.max(0, Number(limit));
+  const lines = content.split(/(?<=\n)/);
+  return lines.slice(start, maxLines === undefined ? undefined : start + maxLines).join("");
+}
+
+async function handleReadTextFile(params) {
+  const filePath = resolveWorkspacePath(params?.path);
+  const content = await readFile(filePath, "utf8");
+  return { content: applyLineLimit(content, params?.line, params?.limit) };
+}
+
+async function handleWriteTextFile(params) {
+  const filePath = resolveWorkspacePath(params?.path);
+  const content = params?.content;
+  if (typeof content !== "string") {
+    throw acpError(-32602, "Missing file content");
+  }
+
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content, "utf8");
+  return {};
+}
+
+function normalizeFileError(err) {
+  if (err?.code === -32602) {
+    return err;
+  }
+  if (err?.code === "ENOENT") {
+    return acpError(-32002, "File not found", err.path);
+  }
+  if (err?.code === "EISDIR") {
+    return acpError(-32602, "Path is a directory", err.path);
+  }
+  return acpError(-32000, err?.message || "Filesystem request failed");
+}
+
+function isReadTextFileMethod(method) {
+  return ["fs/read_text_file", "fs/readTextFile", "read_text_file", "readTextFile"].includes(method);
+}
+
+function isWriteTextFileMethod(method) {
+  return ["fs/write_text_file", "fs/writeTextFile", "write_text_file", "writeTextFile"].includes(method);
+}
+
+function send(method, params, onResult, state = null) {
+  const id = nextId++;
+  pending.set(id, { method, onResult, state });
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  return id;
+}
+
+function respond(id, result) {
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+}
+
+function error(id, code, message) {
+  jsonrpcError(id, code, message);
+}
+
+function notify(method, params) {
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+}
+
+function commandList(state = workspace()) {
+  const seen = new Set();
+  return [...localCommands, ...state.availableCommands]
+    .filter(command => {
+      const name = command.name || command.command || "";
+      if (!name || seen.has(name)) {
+        return false;
+      }
+      seen.add(name);
+      return true;
+    })
+    .map(command => ({
+      name: command.name || command.command,
+      description: command.description || "",
+    }));
+}
+
+function setActiveWorkspace(key, title = key) {
+  const nextKey = String(key || "workspace:default");
+  const state = workspace(nextKey);
+  state.title = title || state.title || nextKey;
+  activeWorkspaceKey = nextKey;
+  activeWorkspaceTitle = state.title;
+  snapshot(state);
+  status(state.promptBusy ? "thinking" : (state.sessionReady ? "ready" : "starting"));
+  if (initialized && !state.sessionId && !state.sessionStarting) {
+    newSession(state);
+  }
+}
+
+function initialize() {
+  status("starting");
+  send("initialize", {
+    protocolVersion: 1,
+    clientCapabilities: supportedClientCapabilities(),
+    clientInfo: {
+      name: "tic-shell",
+      title: "tic-shell",
+      version: "0.1.0",
+    },
+  }, result => {
+    initialized = true;
+    agentTitle = result?.agentInfo?.title || result?.agentInfo?.name || "Codex";
+    newSession(workspace());
+  });
+}
+
+function closeSession(state) {
+  if (state.sessionId) {
+    notify("session/close", { sessionId: state.sessionId });
+    sessionsById.delete(state.sessionId);
+  }
+}
+
+function resetWorkspaceSession(state = workspace(), createImmediately = initialized) {
+  closeSession(state);
+  state.sessionId = "";
+  state.sessionReady = false;
+  state.sessionStarting = false;
+  state.promptBusy = false;
+  state.thinkingEntryId = "";
+  state.lastLocalUserPrompt = "";
+  state.pendingPrompts = [];
+  state.entries = [];
+  state.tools = new Map();
+  state.availableCommands = [];
+  snapshot(state);
+  if (createImmediately) {
+    newSession(state);
+  } else {
+    status("ready");
+  }
+}
+
+function newSession(state = workspace()) {
+  if (!initialized) {
+    return;
+  }
+  if (state.sessionId || state.sessionStarting) {
+    return;
+  }
+
+  state.sessionStarting = true;
+  send("session/new", {
+    cwd,
+    mcpServers: [],
+  }, result => {
+    state.sessionStarting = false;
+    state.sessionId = result?.sessionId || "";
+    state.sessionReady = state.sessionId.length > 0;
+    if (state.sessionReady) {
+      sessionsById.set(state.sessionId, state);
+    }
+    if (state.key === activeWorkspaceKey) {
+      status(state.sessionReady ? "ready" : "error");
+    }
+    if (!state.sessionReady) {
+      appendEntry(state, "error", "Session failed", "The ACP adapter did not return a session id.");
+      return;
+    }
+
+    selectMostPermissiveMode(state, result?.modes);
+    flushPrompts(state);
+  }, state);
+}
+
+function selectMostPermissiveMode(state, modes) {
+  const available = modes?.availableModes || [];
+  if (!Array.isArray(available) || available.length === 0) {
+    return;
+  }
+
+  const preferred = available.find(mode => {
+    const text = `${mode.id || ""} ${mode.name || ""} ${mode.description || ""}`.toLowerCase();
+    return text.includes("full") || text.includes("auto") || text.includes("code");
+  });
+
+  if (preferred && preferred.id && preferred.id !== modes.currentModeId) {
+    send("session/set_mode", { sessionId: state.sessionId, modeId: preferred.id }, undefined, state);
+  }
+}
+
+function parseSlashCommand(text) {
+  const match = String(text || "").match(/^\/([^\s/]+)(?:\s+(.*))?$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    name: match[1],
+    argument: match[2] || "",
+  };
+}
+
+function handleSlashCommand(state, text) {
+  const command = parseSlashCommand(text);
+  if (!command) {
+    return false;
+  }
+
+  if (command.name === "clear" || command.name === "new") {
+    resetWorkspaceSession(state);
+    return true;
+  }
+
+  if (command.name === "cancel") {
+    if (state.sessionId) {
+      notify("session/cancel", { sessionId: state.sessionId });
+      state.promptBusy = false;
+      clearThinking(state);
+      if (state.key === activeWorkspaceKey) {
+        status("ready");
+      }
+    }
+    return true;
+  }
+
+  if (command.name === "help") {
+    appendEntry(
+      state,
+      "assistant",
+      "Codex",
+      commandList(state).map(item => `/${item.name}${item.description ? ` - ${item.description}` : ""}`).join("\n")
+    );
+    return true;
+  }
+
+  return false;
+}
+
+function queuePrompt(text, key = activeWorkspaceKey, title = activeWorkspaceTitle) {
+  const state = workspace(key);
+  state.title = title || state.title;
+  activeWorkspaceKey = state.key;
+  activeWorkspaceTitle = state.title;
+  const trimmed = String(text || "").trim();
+  if (trimmed.length === 0) {
+    return;
+  }
+
+  if (handleSlashCommand(state, trimmed)) {
+    return;
+  }
+
+  state.lastLocalUserPrompt = trimmed;
+  appendEntry(state, "user", "You", trimmed);
+  state.pendingPrompts.push(trimmed);
+  if (!state.sessionId && initialized) {
+    newSession(state);
+  } else {
+    flushPrompts(state);
+  }
+}
+
+function flushPrompts(state = workspace()) {
+  if (!state.sessionReady || state.promptBusy || state.pendingPrompts.length === 0) {
+    return;
+  }
+
+  const text = state.pendingPrompts.shift();
+  state.promptBusy = true;
+  showThinking(state);
+  if (state.key === activeWorkspaceKey) {
+    status("thinking");
+  }
+  send("session/prompt", {
+    sessionId: state.sessionId,
+    prompt: [{ type: "text", text }],
+  }, result => {
+    state.promptBusy = false;
+    clearThinking(state);
+    if (state.key === activeWorkspaceKey) {
+      status("ready");
+    }
+    flushPrompts(state);
+  }, state);
+}
+
+function textFromContent(content) {
+  if (!content) {
+    return "";
+  }
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map(textFromContent).filter(Boolean).join("");
+  }
+  if (content.type === "text") {
+    return content.text || "";
+  }
+  if (content.type === "content") {
+    return textFromContent(content.content);
+  }
+  if (content.type === "diff") {
+    return `Diff: ${content.path || ""}`;
+  }
+  if (content.type === "resource_link") {
+    return content.uri || content.name || "";
+  }
+  if (content.content) {
+    return textFromContent(content.content);
+  }
+  if (content.text) {
+    return content.text;
+  }
+  if (content.title) {
+    return content.title;
+  }
+  return "";
+}
+
+function statusFromTool(update) {
+  return update.fields?.status || update.status || update.content?.status || "pending";
+}
+
+function contentFromTool(update) {
+  const parts = [];
+  const statusText = statusFromTool(update);
+  if (statusText) {
+    parts.push(statusText);
+  }
+
+  const contentText = textFromContent(update.content || update.fields?.content);
+  if (contentText.trim()) {
+    parts.push(contentText.trim());
+  }
+
+  const rawOutput = update.rawOutput || update.fields?.rawOutput || update.fields?.raw_output;
+  if (rawOutput) {
+    parts.push(textFromContent(rawOutput).trim());
+  }
+
+  return parts.filter(Boolean).join("\n");
+}
+
+function handleToolCall(state, update) {
+  clearThinking(state);
+  const id = update.toolCallId || update.tool_call_id || update.id;
+  if (!id) {
+    appendEntry(state, "tool", update.title || "Tool call", contentFromTool(update));
+    return;
+  }
+
+  const previous = state.tools.get(id) || {};
+  const next = {
+    ...previous,
+    ...update,
+    fields: { ...(previous.fields || {}), ...(update.fields || {}) },
+  };
+  const title = next.title || next.fields?.title || id || "Tool call";
+  state.tools.set(id, next);
+  replaceEntry(state, `tool:${id}`, "tool", title, contentFromTool(next));
+}
+
+function handleUserChunk(state, update) {
+  const body = textFromContent(update.content);
+  if (!body.trim()) {
+    return;
+  }
+
+  const previous = state.entries[state.entries.length - 1];
+  if (previous?.kind === "user" && previous.body.includes(body)) {
+    return;
+  }
+  if (state.lastLocalUserPrompt && state.lastLocalUserPrompt.includes(body)) {
+    return;
+  }
+
+  appendOrMergeStream(state, "user", "You", body);
+}
+
+function handleUpdate(update, sessionId = "") {
+  if (!update || typeof update !== "object") {
+    return;
+  }
+  const state = sessionId ? workspaceForSession(sessionId) : workspace();
+
+  switch (update.sessionUpdate) {
+    case "user_message_chunk":
+      handleUserChunk(state, update);
+      break;
+    case "agent_message_chunk":
+    case "agent_thought_chunk": {
+      const body = textFromContent(update.content);
+      if (body.trim()) {
+        appendOrMergeStream(
+          state,
+          update.sessionUpdate === "agent_thought_chunk" ? "thinking" : "assistant",
+          update.sessionUpdate === "agent_thought_chunk" ? "Thinking" : agentTitle,
+          body
+        );
+      }
+      break;
+    }
+    case "tool_call":
+    case "tool_call_update": {
+      handleToolCall(state, update);
+      break;
+    }
+    case "plan": {
+      const entries = Array.isArray(update.entries) ? update.entries : [];
+      const body = entries.map(entry => {
+        const status = entry.status ? `[${entry.status}] ` : "";
+        return `${status}${entry.content || ""}`;
+      }).filter(Boolean).join("\n");
+      if (body) {
+        replaceEntry(state, "plan:current", "plan", "Plan", body);
+      }
+      break;
+    }
+    case "session_info_update": {
+      const title = update.title && update.title.value !== undefined ? update.title.value : update.title;
+      if (typeof title === "string" && title.trim()) {
+        agentTitle = title;
+      }
+      break;
+    }
+    case "available_commands_update":
+      state.availableCommands = update.availableCommands || update.available_commands || [];
+      emitWorkspace();
+      break;
+    case "current_mode_update":
+      break;
+    case "config_option_update":
+    case "usage_update": {
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function allowPermissionRequest(message) {
+  const options = message.params?.options || [];
+  const option = options.find(item => (item.kind || item.optionKind) === "allow_always")
+    || options.find(item => (item.kind || item.optionKind) === "allow_once")
+    || options.find(item => String(item.optionId || "").toLowerCase().includes("allow"))
+    || options[0];
+
+  if (!option?.optionId) {
+    error(message.id, -32602, "No permission option available");
+    return;
+  }
+
+  respond(message.id, {
+    outcome: {
+      outcome: "selected",
+      optionId: option.optionId,
+    },
+  });
+}
+
+async function handleClientRequest(message) {
+  try {
+    if (message.method === "session/request_permission") {
+      allowPermissionRequest(message);
+      return;
+    }
+
+    if (isReadTextFileMethod(message.method)) {
+      respond(message.id, await handleReadTextFile(message.params || {}));
+      return;
+    }
+
+    if (isWriteTextFileMethod(message.method)) {
+      respond(message.id, await handleWriteTextFile(message.params || {}));
+      return;
+    }
+
+    error(message.id, -32601, `Unsupported client method: ${message.method}`);
+  } catch (err) {
+    const normalized = normalizeFileError(err);
+    jsonrpcError(message.id, normalized.code, normalized.message, normalized.data);
+  }
+}
+
+function handleAgentMessage(message) {
+  if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
+    const request = pending.get(message.id);
+    if (!request) {
+      return;
+    }
+
+    pending.delete(message.id);
+    if (message.error) {
+      status("error");
+      appendEntry(request.state || workspace(), "error", request.method, message.error.message || JSON.stringify(message.error));
+      if (request.method === "session/new" && request.state) {
+        request.state.sessionStarting = false;
+      }
+      if (request.method === "session/prompt") {
+        const state = request.state || workspace();
+        state.promptBusy = false;
+        clearThinking(state);
+        status(state.sessionReady ? "ready" : "error");
+        flushPrompts(state);
+      }
+      return;
+    }
+
+    request.onResult?.(message.result);
+    return;
+  }
+
+  if (message.method === "session/update") {
+    handleUpdate(message.params?.update, message.params?.sessionId || message.params?.session_id);
+    return;
+  }
+
+  if (message.id !== undefined) {
+    return handleClientRequest(message);
+  }
+}
+
+function handleClientInput(line) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  try {
+    const message = JSON.parse(trimmed);
+    if (message.type === "prompt") {
+      queuePrompt(message.text, message.workspaceKey || activeWorkspaceKey, message.workspaceTitle || activeWorkspaceTitle);
+    } else if (message.type === "workspace") {
+      setActiveWorkspace(message.workspaceKey, message.workspaceTitle);
+    } else if (message.type === "clear" || message.type === "new") {
+      resetWorkspaceSession(workspace(message.workspaceKey || activeWorkspaceKey));
+    } else if (message.type === "cancel") {
+      const state = workspace(message.workspaceKey || activeWorkspaceKey);
+      if (state.sessionId) {
+        notify("session/cancel", { sessionId: state.sessionId });
+        state.promptBusy = false;
+        clearThinking(state);
+      }
+    }
+  } catch (err) {
+    appendEntry(workspace(), "error", "Client input", err.message);
+  }
+}
+
+function handleExit(code, signal) {
+  for (const state of workspaces.values()) {
+    state.sessionReady = false;
+    state.promptBusy = false;
+    clearThinking(state);
+  }
+  status("stopped");
+}
+
+function handleSpawnError(err) {
+  status("error");
+  event("error", "Failed to start Codex ACP", err.message);
+}
+
+return {
+  initialize,
+  handleAgentMessage,
+  handleClientInput,
+  handleExit,
+  handleSpawnError,
+  event,
+  setActiveWorkspace,
+  queuePrompt,
+  entries: workspace().entries,
+  workspaces,
+  resolveWorkspacePath,
+  handleReadTextFile,
+  handleWriteTextFile,
+};
 }
 
 function adapterShellCommand() {
@@ -39,6 +790,7 @@ function adapterShellCommand() {
   ].join(" ");
 }
 
+function main() {
 const child = spawn("bash", ["-c", adapterShellCommand()], {
   cwd,
   env: {
@@ -54,252 +806,7 @@ const child = spawn("bash", ["-c", adapterShellCommand()], {
   stdio: ["pipe", "pipe", "pipe"],
 });
 
-function send(method, params, onResult) {
-  const id = nextId++;
-  pending.set(id, { method, onResult });
-  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-  return id;
-}
-
-function respond(id, result) {
-  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
-}
-
-function error(id, code, message) {
-  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
-}
-
-function notify(method, params) {
-  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
-}
-
-function initialize() {
-  status("starting");
-  send("initialize", {
-    protocolVersion: 1,
-    clientCapabilities: {},
-    clientInfo: {
-      name: "tic-shell",
-      title: "tic-shell",
-      version: "0.1.0",
-    },
-  }, result => {
-    initialized = true;
-    const title = result?.agentInfo?.title || result?.agentInfo?.name || "Codex ACP";
-    event("system", "Connected", title);
-    newSession();
-  });
-}
-
-function newSession() {
-  if (!initialized) {
-    return;
-  }
-
-  send("session/new", {
-    cwd,
-    mcpServers: [],
-  }, result => {
-    sessionId = result?.sessionId || "";
-    sessionReady = sessionId.length > 0;
-    status(sessionReady ? "ready" : "error");
-    if (!sessionReady) {
-      event("error", "Session failed", "The ACP adapter did not return a session id.");
-      return;
-    }
-
-    event("system", "Session ready", sessionId);
-    selectMostPermissiveMode(result?.modes);
-    flushPrompts();
-  });
-}
-
-function selectMostPermissiveMode(modes) {
-  const available = modes?.availableModes || [];
-  if (!Array.isArray(available) || available.length === 0) {
-    return;
-  }
-
-  const preferred = available.find(mode => {
-    const text = `${mode.id || ""} ${mode.name || ""} ${mode.description || ""}`.toLowerCase();
-    return text.includes("full") || text.includes("auto") || text.includes("code");
-  });
-
-  if (preferred && preferred.id && preferred.id !== modes.currentModeId) {
-    send("session/set_mode", { sessionId, modeId: preferred.id }, () => {
-      event("system", "Mode", preferred.name || preferred.id);
-    });
-  }
-}
-
-function queuePrompt(text) {
-  const trimmed = String(text || "").trim();
-  if (trimmed.length === 0) {
-    return;
-  }
-
-  event("user", "You", trimmed);
-  pendingPrompts.push(trimmed);
-  flushPrompts();
-}
-
-function flushPrompts() {
-  if (!sessionReady || promptBusy || pendingPrompts.length === 0) {
-    return;
-  }
-
-  const text = pendingPrompts.shift();
-  promptBusy = true;
-  status("thinking");
-  send("session/prompt", {
-    sessionId,
-    prompt: [{ type: "text", text }],
-  }, result => {
-    promptBusy = false;
-    status("ready");
-    const stopReason = result?.stopReason || "end_turn";
-    event("system", "Turn complete", stopReason);
-    flushPrompts();
-  });
-}
-
-function textFromContent(content) {
-  if (!content) {
-    return "";
-  }
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map(textFromContent).filter(Boolean).join("\n");
-  }
-  if (content.type === "text") {
-    return content.text || "";
-  }
-  if (content.type === "content") {
-    return textFromContent(content.content);
-  }
-  if (content.type === "diff") {
-    return `Diff: ${content.path || ""}`;
-  }
-  if (content.content) {
-    return textFromContent(content.content);
-  }
-  if (content.text) {
-    return content.text;
-  }
-  if (content.title) {
-    return content.title;
-  }
-  return "";
-}
-
-function handleUpdate(update) {
-  if (!update || typeof update !== "object") {
-    return;
-  }
-
-  switch (update.sessionUpdate) {
-    case "agent_message_chunk":
-    case "agent_thought_chunk": {
-      const body = textFromContent(update.content);
-      if (body.trim()) {
-        event(update.sessionUpdate === "agent_thought_chunk" ? "thought" : "assistant", "Codex", body);
-      }
-      break;
-    }
-    case "tool_call": {
-      const title = update.title || update.toolCallId || "Tool call";
-      tools.set(update.toolCallId, { ...update, title });
-      event("tool", title, update.status || "pending");
-      break;
-    }
-    case "tool_call_update": {
-      const previous = tools.get(update.toolCallId) || {};
-      const title = previous.title || update.title || update.toolCallId || "Tool call";
-      tools.set(update.toolCallId, { ...previous, ...update, title });
-      const body = [update.status, textFromContent(update.content)].filter(Boolean).join("\n");
-      event("tool", title, body);
-      break;
-    }
-    case "plan": {
-      const entries = Array.isArray(update.entries) ? update.entries : [];
-      const body = entries.map(entry => {
-        const status = entry.status ? `[${entry.status}] ` : "";
-        return `${status}${entry.content || ""}`;
-      }).filter(Boolean).join("\n");
-      if (body) {
-        event("plan", "Plan", body);
-      }
-      break;
-    }
-    case "current_mode_update":
-      event("system", "Mode", update.modeId || "");
-      break;
-    default:
-      event("system", update.sessionUpdate || "Session update", textFromContent(update.content) || JSON.stringify(update));
-      break;
-  }
-}
-
-function allowPermissionRequest(message) {
-  const options = message.params?.options || [];
-  const option = options.find(item => item.kind === "allow_always")
-    || options.find(item => item.kind === "allow_once")
-    || options.find(item => String(item.optionId || "").toLowerCase().includes("allow"))
-    || options[0];
-
-  if (!option?.optionId) {
-    error(message.id, -32602, "No permission option available");
-    return;
-  }
-
-  const title = message.params?.toolCall?.title || message.params?.toolCall?.toolCallId || "Permission";
-  event("permission", "Allowed", `${title}: ${option.name || option.optionId}`);
-  respond(message.id, {
-    outcome: {
-      outcome: "selected",
-      optionId: option.optionId,
-    },
-  });
-}
-
-function handleAgentMessage(message) {
-  if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
-    const request = pending.get(message.id);
-    if (!request) {
-      return;
-    }
-
-    pending.delete(message.id);
-    if (message.error) {
-      status("error");
-      event("error", request.method, message.error.message || JSON.stringify(message.error));
-      if (request.method === "session/prompt") {
-        promptBusy = false;
-        flushPrompts();
-      }
-      return;
-    }
-
-    request.onResult?.(message.result);
-    return;
-  }
-
-  if (message.method === "session/update") {
-    handleUpdate(message.params?.update);
-    return;
-  }
-
-  if (message.method === "session/request_permission") {
-    allowPermissionRequest(message);
-    return;
-  }
-
-  if (message.id !== undefined) {
-    error(message.id, -32601, `Unsupported client method: ${message.method}`);
-  }
-}
+const client = createClient({ child });
 
 createInterface({ input: child.stdout }).on("line", line => {
   const trimmed = line.trim();
@@ -307,47 +814,36 @@ createInterface({ input: child.stdout }).on("line", line => {
     return;
   }
   try {
-    handleAgentMessage(JSON.parse(trimmed));
+    client.handleAgentMessage(JSON.parse(trimmed));
   } catch (err) {
-    event("stderr", "codex-acp", trimmed);
+    client.event("stderr", "codex-acp", trimmed);
   }
 });
 
 createInterface({ input: child.stderr }).on("line", line => {
   const trimmed = line.trim();
   if (trimmed) {
-    event("stderr", "codex-acp", trimmed);
+    client.event("stderr", "codex-acp", trimmed);
   }
 });
 
 createInterface({ input: process.stdin }).on("line", line => {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return;
-  }
-
-  try {
-    const message = JSON.parse(trimmed);
-    if (message.type === "prompt") {
-      queuePrompt(message.text);
-    } else if (message.type === "cancel" && sessionId) {
-      notify("session/cancel", { sessionId });
-    }
-  } catch (err) {
-    event("error", "Client input", err.message);
-  }
+  client.handleClientInput(line);
 });
 
 child.on("error", err => {
-  status("error");
-  event("error", "Failed to start Codex ACP", err.message);
+  client.handleSpawnError(err);
 });
 
 child.on("exit", (code, signal) => {
-  sessionReady = false;
-  promptBusy = false;
-  status("stopped");
-  event("system", "Codex ACP exited", signal ? `signal ${signal}` : `exit ${code}`);
+  client.handleExit(code, signal);
 });
 
-initialize();
+client.initialize();
+}
+
+if (process.env.TIC_CODEX_AGENT_TEST !== "1") {
+  main();
+}
+
+export { createClient };

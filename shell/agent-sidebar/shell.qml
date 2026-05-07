@@ -22,9 +22,13 @@ ShellRoot {
   property var workspaceRows: []
   property var windowRows: []
   property int expandedWorkspaceId: -1
+  property int activeWorkspaceId: -1
+  property string activeWorkspaceLabel: "Workspace"
   property bool sidebarCollapsed: false
   property bool stateReady: false
   property string agentStatus: "starting"
+  property var agentCommands: []
+  property int slashCommandIndex: 0
 
   function workspaceKey(workspaceId) {
     return "niri:workspace:" + workspaceId;
@@ -49,12 +53,23 @@ ShellRoot {
   function appendAgentEvent(kind, title, body) {
     const next = agentEvents.slice();
     next.push({
+      id: kind + ":" + next.length + ":" + Date.now(),
       kind: kind,
       title: title,
       body: body,
       time: Qt.formatTime(new Date(), "HH:mm")
     });
     agentEvents = next;
+  }
+
+  function setAgentEvents(events) {
+    agentEvents = events.map((entry, index) => ({
+      id: entry.id || ("entry:" + index),
+      kind: entry.kind || "system",
+      title: entry.title || "Codex",
+      body: entry.body || "",
+      time: entry.time || Qt.formatTime(new Date(), "HH:mm")
+    }));
   }
 
   function handleAgentLine(line) {
@@ -67,6 +82,11 @@ ShellRoot {
       const message = JSON.parse(trimmed);
       if (message.type === "status") {
         agentStatus = message.status || "unknown";
+      } else if (message.type === "snapshot") {
+        setAgentEvents(message.events || []);
+      } else if (message.type === "workspace") {
+        activeWorkspaceLabel = message.title || activeWorkspaceLabel;
+        agentCommands = message.commands || [];
       } else if (message.type === "event") {
         appendAgentEvent(message.kind || "system", message.title || "Codex", message.body || "");
       }
@@ -87,7 +107,102 @@ ShellRoot {
 
     codexAgent.write(JSON.stringify({
       type: "prompt",
-      text: trimmed
+      text: trimmed,
+      workspaceKey: currentAgentWorkspaceKey(),
+      workspaceTitle: activeWorkspaceLabel
+    }) + "\n");
+  }
+
+  function builtInAgentCommands() {
+    return [
+      { name: "clear", description: "Clear this workspace session" },
+      { name: "new", description: "Start a new session for this workspace" },
+      { name: "cancel", description: "Cancel the running turn" },
+      { name: "help", description: "Show available slash commands" }
+    ];
+  }
+
+  function allAgentCommands() {
+    const seen = {};
+    const result = [];
+    const source = builtInAgentCommands().concat(agentCommands || []);
+    for (let i = 0; i < source.length; i++) {
+      const name = source[i].name || "";
+      if (name.length > 0 && !seen[name]) {
+        seen[name] = true;
+        result.push({
+          name: name,
+          description: source[i].description || ""
+        });
+      }
+    }
+    return result;
+  }
+
+  function slashCommandQuery(text) {
+    const trimmed = text || "";
+    if (!trimmed.startsWith("/") || trimmed.indexOf(" ") !== -1) {
+      return "";
+    }
+    return trimmed.substring(1).toLowerCase();
+  }
+
+  function filteredAgentCommands(text) {
+    if (!(text || "").startsWith("/") || (text || "").indexOf(" ") !== -1) {
+      return [];
+    }
+
+    const query = slashCommandQuery(text);
+    return allAgentCommands().filter(command => {
+      const name = command.name.toLowerCase();
+      const description = (command.description || "").toLowerCase();
+      return query.length === 0 || name.indexOf(query) !== -1 || description.indexOf(query) !== -1;
+    });
+  }
+
+  function selectedSlashCommand() {
+    const commands = filteredAgentCommands(agentPromptInput.text);
+    if (commands.length === 0) {
+      return null;
+    }
+    const index = Math.max(0, Math.min(slashCommandIndex, commands.length - 1));
+    return commands[index];
+  }
+
+  function completeSlashCommand(command) {
+    if (!command) {
+      return;
+    }
+    agentPromptInput.text = "/" + command.name + " ";
+    agentPromptInput.cursorPosition = agentPromptInput.text.length;
+    agentPromptInput.forceActiveFocus();
+  }
+
+  function sendAgentControl(type) {
+    if (!codexAgent.running) {
+      codexAgent.running = true;
+    }
+
+    codexAgent.write(JSON.stringify({
+      type: type,
+      workspaceKey: currentAgentWorkspaceKey(),
+      workspaceTitle: activeWorkspaceLabel
+    }) + "\n");
+  }
+
+  function currentAgentWorkspaceKey() {
+    return activeWorkspaceId === -1 ? "workspace:default" : workspaceKey(activeWorkspaceId);
+  }
+
+  function notifyAgentWorkspace() {
+    if (!codexAgent.running) {
+      return;
+    }
+
+    codexAgent.write(JSON.stringify({
+      type: "workspace",
+      workspaceKey: currentAgentWorkspaceKey(),
+      workspaceTitle: activeWorkspaceLabel
     }) + "\n");
   }
 
@@ -208,6 +323,12 @@ ShellRoot {
 
     if (activeWorkspaceId !== -1) {
       expandedWorkspaceId = activeWorkspaceId;
+      if (activeWorkspaceId !== shell.activeWorkspaceId) {
+        shell.activeWorkspaceId = activeWorkspaceId;
+        const activeRow = rows.find(row => row.id === activeWorkspaceId);
+        activeWorkspaceLabel = activeRow ? activeRow.label : "Workspace";
+        notifyAgentWorkspace();
+      }
     }
 
     windowRows = windows;
@@ -287,14 +408,7 @@ ShellRoot {
     Niri.refreshOutputs();
     Niri.refreshWorkspaces();
     Niri.refreshWindows();
-    agentEvents = [
-      {
-        kind: "system",
-        title: "Codex ACP",
-        body: "Starting Codex agent...",
-        time: Qt.formatTime(new Date(), "HH:mm")
-      }
-    ];
+    agentEvents = [];
     Qt.callLater(refreshState);
   }
 
@@ -765,27 +879,107 @@ ShellRoot {
 
             Column {
               width: parent.width
-              height: 40
+              height: 34
               spacing: 3
 
-              Text {
+              Row {
                 width: parent.width
-                height: 20
-                color: "#cad3f5"
-                font.pixelSize: 17
-                font.weight: Font.DemiBold
-                text: "Codex"
-                elide: Text.ElideRight
+                height: 28
+                spacing: 6
+
+                Text {
+                  width: parent.width - newSessionButton.width - clearSessionButton.width - cancelSessionButton.width - parent.spacing * 3
+                  height: parent.height
+                  color: "#cad3f5"
+                  font.pixelSize: 17
+                  font.weight: Font.DemiBold
+                  verticalAlignment: Text.AlignVCenter
+                  text: "Codex"
+                  elide: Text.ElideRight
+                }
+
+                Rectangle {
+                  id: newSessionButton
+                  width: 28
+                  height: 28
+                  radius: 6
+                  color: newSessionMouse.containsMouse ? "#3a4050" : "#2b303b"
+                  border.color: "#596173"
+
+                  Text {
+                    anchors.centerIn: parent
+                    color: "#8bd5ca"
+                    font.pixelSize: 18
+                    text: "+"
+                  }
+
+                  MouseArea {
+                    id: newSessionMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: shell.sendAgentControl("new")
+                  }
+                }
+
+                Rectangle {
+                  id: clearSessionButton
+                  width: 28
+                  height: 28
+                  radius: 6
+                  color: clearSessionMouse.containsMouse ? "#3a4050" : "#2b303b"
+                  border.color: "#596173"
+
+                  Text {
+                    anchors.centerIn: parent
+                    color: "#cad3f5"
+                    font.pixelSize: 13
+                    font.weight: Font.DemiBold
+                    text: "C"
+                  }
+
+                  MouseArea {
+                    id: clearSessionMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: shell.sendAgentControl("clear")
+                  }
+                }
+
+                Rectangle {
+                  id: cancelSessionButton
+                  width: 28
+                  height: 28
+                  radius: 6
+                  color: cancelSessionMouse.containsMouse ? "#3a4050" : "#2b303b"
+                  border.color: "#596173"
+
+                  Text {
+                    anchors.centerIn: parent
+                    color: "#ed8796"
+                    font.pixelSize: 15
+                    font.weight: Font.DemiBold
+                    text: "x"
+                  }
+
+                  MouseArea {
+                    id: cancelSessionMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: shell.sendAgentControl("cancel")
+                  }
+                }
               }
 
               Text {
+                visible: shell.agentStatus === "error" || shell.agentStatus === "stopped"
                 width: parent.width
                 height: 16
-                color: shell.agentStatus === "error" || shell.agentStatus === "stopped" ? "#ed8796" : (shell.agentStatus === "thinking" ? "#eed49f" : "#8bd5ca")
+                color: shell.agentStatus === "error" || shell.agentStatus === "stopped" ? "#ed8796" : "#8bd5ca"
                 font.pixelSize: 12
-                text: shell.agentStatus
+                text: shell.agentStatus === "error" || shell.agentStatus === "stopped" ? shell.agentStatus : ""
                 elide: Text.ElideRight
               }
+
             }
 
             Flickable {
@@ -806,14 +1000,19 @@ ShellRoot {
 
                   Rectangle {
                     readonly property bool isUser: modelData.kind === "user"
+                    readonly property bool isAssistant: modelData.kind === "assistant"
+                    readonly property bool isThought: modelData.kind === "thought"
+                    readonly property bool isThinking: modelData.kind === "thinking"
                     readonly property bool isTool: modelData.kind === "tool"
                     readonly property bool isPermission: modelData.kind === "permission"
+                    readonly property bool hasHeader: isTool || isPermission || isThinking || isThought
 
                     width: parent.width
-                    height: Math.max(58, eventBody.implicitHeight + 36)
+                    height: Math.max(isThinking ? 38 : 46, eventBody.implicitHeight + (hasHeader ? 36 : 20))
                     radius: 7
-                    color: isTool ? "#26333b" : (isPermission ? "#332f3c" : (isUser ? "#303642" : "#252a34"))
-                    border.color: isTool ? "#8aadf4" : (isPermission ? "#c6a0f6" : "#3a4050")
+                    color: isTool ? "#26333b" : (isPermission ? "#332f3c" : (isUser ? "#303642" : (isThinking ? "#222832" : "#20242c")))
+                    border.color: isTool ? "#8aadf4" : (isPermission ? "#c6a0f6" : (isThinking ? "#596173" : "transparent"))
+                    border.width: hasHeader || isUser ? 1 : 0
 
                     Column {
                       anchors.fill: parent
@@ -821,6 +1020,7 @@ ShellRoot {
                       spacing: 5
 
                       Row {
+                        visible: parent.parent.hasHeader
                         width: parent.width
                         height: 15
                         spacing: 6
@@ -828,7 +1028,7 @@ ShellRoot {
                         Text {
                           width: parent.width - eventTime.width - parent.spacing
                           height: parent.height
-                          color: isTool ? "#8aadf4" : (isPermission ? "#c6a0f6" : "#cad3f5")
+                          color: isTool ? "#8aadf4" : (isPermission ? "#c6a0f6" : (isThinking ? "#eed49f" : "#a6da95"))
                           font.pixelSize: 12
                           font.weight: Font.DemiBold
                           text: modelData.title
@@ -837,6 +1037,7 @@ ShellRoot {
 
                         Text {
                           id: eventTime
+                          visible: !parent.parent.parent.isThinking
                           width: 38
                           height: parent.height
                           color: "#7f8797"
@@ -848,6 +1049,7 @@ ShellRoot {
 
                       Text {
                         id: eventBody
+                        visible: modelData.kind !== "thinking" || modelData.body.length > 0
                         width: parent.width
                         color: "#b8c0d6"
                         font.pixelSize: 12
@@ -864,9 +1066,104 @@ ShellRoot {
               id: agentInputBox
               width: parent.width
               height: 76
+              z: 10
               radius: 7
               color: "#252a34"
               border.color: agentPromptInput.activeFocus ? "#8bd5ca" : "#3a4050"
+
+              Rectangle {
+                id: slashCommandPopup
+
+                readonly property var commands: shell.filteredAgentCommands(agentPromptInput.text)
+
+                visible: agentPromptInput.activeFocus && commands.length > 0
+                width: parent.width
+                height: visible ? Math.min(166, commands.length * 38 + 10) : 0
+                x: 0
+                y: -height - 6
+                z: 20
+                radius: 7
+                color: "#252a34"
+                border.color: "#596173"
+                clip: true
+
+                onCommandsChanged: {
+                  if (shell.slashCommandIndex >= commands.length) {
+                    shell.slashCommandIndex = Math.max(0, commands.length - 1);
+                  }
+                  slashCommandList.positionViewAtIndex(shell.slashCommandIndex, ListView.Contain);
+                }
+
+                ListView {
+                  id: slashCommandList
+
+                  anchors.fill: parent
+                  anchors.margins: 5
+                  clip: true
+                  spacing: 3
+                  model: slashCommandPopup.commands
+                  currentIndex: shell.slashCommandIndex
+                  boundsBehavior: Flickable.StopAtBounds
+
+                  onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+
+                  delegate: Rectangle {
+                    readonly property bool selected: index === shell.slashCommandIndex
+
+                    width: slashCommandList.width
+                    height: 35
+                    radius: 5
+                    color: selected || slashCommandMouse.containsMouse ? "#303642" : "transparent"
+
+                    Row {
+                      anchors.fill: parent
+                      anchors.leftMargin: 8
+                      anchors.rightMargin: 8
+                      spacing: 8
+
+                      Text {
+                        width: 86
+                        height: parent.height
+                        color: "#8bd5ca"
+                        font.pixelSize: 12
+                        font.weight: Font.DemiBold
+                        verticalAlignment: Text.AlignVCenter
+                        text: "/" + modelData.name
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        width: parent.width - 94
+                        height: parent.height
+                        color: "#b8c0d6"
+                        font.pixelSize: 11
+                        verticalAlignment: Text.AlignVCenter
+                        text: modelData.description
+                        elide: Text.ElideRight
+                      }
+                    }
+
+                    MouseArea {
+                      id: slashCommandMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      onEntered: shell.slashCommandIndex = index
+                      onClicked: shell.completeSlashCommand(modelData)
+                    }
+                  }
+                }
+
+                Rectangle {
+                  visible: slashCommandList.contentHeight > slashCommandList.height
+                  width: 3
+                  height: Math.max(18, slashCommandList.height * slashCommandList.height / slashCommandList.contentHeight)
+                  x: parent.width - width - 3
+                  y: 5 + (slashCommandList.height - height) * (slashCommandList.contentY / Math.max(1, slashCommandList.contentHeight - slashCommandList.height))
+                  radius: 2
+                  color: "#7f8797"
+                  opacity: 0.75
+                }
+              }
 
               Column {
                 anchors.fill: parent
@@ -884,9 +1181,56 @@ ShellRoot {
                   clip: true
                   selectByMouse: true
                   verticalAlignment: TextInput.AlignVCenter
+                  onTextChanged: {
+                    if (!text.startsWith("/")) {
+                      shell.slashCommandIndex = 0;
+                    } else {
+                      const commands = shell.filteredAgentCommands(text);
+                      if (shell.slashCommandIndex >= commands.length) {
+                        shell.slashCommandIndex = Math.max(0, commands.length - 1);
+                      }
+                    }
+                  }
                   onAccepted: {
-                    shell.sendAgentPrompt(text);
-                    text = "";
+                    if (slashCommandPopup.visible && shell.selectedSlashCommand() !== null && text.indexOf(" ") === -1) {
+                      shell.completeSlashCommand(shell.selectedSlashCommand());
+                    } else {
+                      shell.sendAgentPrompt(text);
+                      text = "";
+                    }
+                  }
+
+                  Keys.onDownPressed: function(event) {
+                    const commands = shell.filteredAgentCommands(text);
+                    if (commands.length > 0) {
+                      shell.slashCommandIndex = Math.min(commands.length - 1, shell.slashCommandIndex + 1);
+                      slashCommandList.positionViewAtIndex(shell.slashCommandIndex, ListView.Contain);
+                      event.accepted = true;
+                    }
+                  }
+
+                  Keys.onUpPressed: function(event) {
+                    const commands = shell.filteredAgentCommands(text);
+                    if (commands.length > 0) {
+                      shell.slashCommandIndex = Math.max(0, shell.slashCommandIndex - 1);
+                      slashCommandList.positionViewAtIndex(shell.slashCommandIndex, ListView.Contain);
+                      event.accepted = true;
+                    }
+                  }
+
+                  Keys.onEscapePressed: function(event) {
+                    if (slashCommandPopup.visible) {
+                      text = "";
+                      shell.slashCommandIndex = 0;
+                      event.accepted = true;
+                    }
+                  }
+
+                  Keys.onTabPressed: function(event) {
+                    if (slashCommandPopup.visible && shell.selectedSlashCommand() !== null) {
+                      shell.completeSlashCommand(shell.selectedSlashCommand());
+                      event.accepted = true;
+                    }
                   }
 
                   Text {
