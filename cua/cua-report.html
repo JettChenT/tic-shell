@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CUA CLI Implementation Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #5f6b7a;
+      --line: #d8dee8;
+      --accent: #1769aa;
+      --accent-soft: #e8f2fb;
+      --ok: #13795b;
+      --warn: #8a5a00;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    main,
+    .header-inner {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .header-inner {
+      padding: 32px 0 24px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 34px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 820px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    main {
+      padding: 24px 0 56px;
+    }
+
+    section {
+      margin: 0 0 24px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 18px 0 8px;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.94em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 10px 0 0;
+      padding: 14px 16px;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-top: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 650;
+      background: #fbfcfd;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .callout {
+      padding: 12px 14px;
+      border: 1px solid #b7d6ef;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: #17476d;
+    }
+
+    .badge {
+      display: inline-block;
+      margin: 0 8px 8px 0;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #eef1f5;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .badge.ok {
+      background: #e6f4ee;
+      color: var(--ok);
+    }
+
+    .badge.warn {
+      background: #fff4d8;
+      color: var(--warn);
+    }
+
+    @media (max-width: 760px) {
+      main,
+      .header-inner {
+        width: min(100% - 24px, 1120px);
+      }
+
+      h1 {
+        font-size: 28px;
+      }
+
+      section {
+        padding: 16px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <h1>CUA CLI Implementation Report</h1>
+      <p class="subtitle">
+        A Rust command-line interface for computer-use automation on Wayland, implemented niri-first with compositor-rendered window screenshots and uinput input injection.
+      </p>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Status</h2>
+      <span class="badge ok">Rust crate builds</span>
+      <span class="badge ok">Patched niri active</span>
+      <span class="badge ok">Silent screenshots verified</span>
+      <span class="badge ok">Workspace describe verified</span>
+      <span class="badge warn">Type command not live-tested into shell</span>
+      <p>
+        The CLI lives in <code>/home/jettc/osdev/tic-shell/cua</code>. It targets niri first and discovers the active compositor socket from <code>NIRI_SOCKET</code>, <code>XDG_RUNTIME_DIR</code>, or matching <code>/run/user/*/niri.*.sock</code> sockets.
+      </p>
+      <p>
+        The running compositor is the patched forked niri at <code>/nix/store/00lrnrsrms4k2595q8ayvj1n50kqlh2i-niri-26.04-cua/bin/niri</code>. Its IPC command <code>screenshot-window</code> now accepts <code>--notify false</code>.
+      </p>
+    </section>
+
+    <section>
+      <h2>Architecture</h2>
+      <div class="grid">
+        <div>
+          <h3>Metadata</h3>
+          <ul>
+            <li><code>niri msg --json workspaces</code> resolves active and requested workspaces.</li>
+            <li><code>niri msg --json windows</code> lists windows, titles, app IDs, PIDs, focus state, and layout sizes.</li>
+            <li><code>CUA_WORKSPACE_ID</code> or <code>NIRI_WORKSPACE_ID</code> can supply the default workspace.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Screenshots</h3>
+          <ul>
+            <li><code>cua</code> asks niri to render a window by ID directly from compositor state.</li>
+            <li>The command passes <code>--notify false</code> to avoid desktop notifications.</li>
+            <li>Window screenshots are written to temp files and combined into a workspace composite PNG.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Input</h3>
+          <ul>
+            <li><code>click</code>, <code>scroll</code>, and <code>type-text</code> use Linux <code>uinput</code>.</li>
+            <li>Input is delivered through regular focused-seat behavior; background clicks are not supported by Wayland/niri.</li>
+            <li>Click and scroll focus the target window before calculating absolute output coordinates.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Fallback</h3>
+          <ul>
+            <li><code>--intrusive-fallback</code> remains available for grim-based screenshots after focusing a window.</li>
+            <li>The normal path no longer uses grim and does not shift focus for screenshot capture.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Command Interface</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Command</th>
+            <th>Signature</th>
+            <th>Behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>describe-workspace</code><br><code>describe_workspace</code></td>
+            <td><code>cua describe-workspace [workspace_id]</code></td>
+            <td>Lists windows in a workspace, captures each window, creates a composite screenshot, and prints JSON.</td>
+          </tr>
+          <tr>
+            <td><code>screenshot-window</code><br><code>screenshot_window</code></td>
+            <td><code>cua screenshot-window &lt;window_id&gt;</code></td>
+            <td>Captures a single niri window by ID to a temp PNG using non-intrusive niri IPC.</td>
+          </tr>
+          <tr>
+            <td><code>click</code></td>
+            <td><code>cua click &lt;window_id&gt; &lt;x&gt; &lt;y&gt;</code></td>
+            <td>Focuses the target window, moves the virtual pointer to window-relative coordinates, and sends a left click.</td>
+          </tr>
+          <tr>
+            <td><code>type-text</code><br><code>type</code></td>
+            <td><code>cua type-text &lt;window_id&gt; &lt;text&gt;</code></td>
+            <td>Focuses the target window and emits supported ASCII text through a virtual keyboard.</td>
+          </tr>
+          <tr>
+            <td><code>scroll</code></td>
+            <td><code>cua scroll &lt;window_id&gt; &lt;up|down|left|right&gt; &lt;amount&gt; [x] [y]</code></td>
+            <td>Focuses the target window, moves to an optional window-relative point, and sends wheel events.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Example Responses</h2>
+
+      <h3>Single Window Screenshot</h3>
+      <pre><code>$ ./target/debug/cua screenshot-window 2
+{
+  "window_id": 2,
+  "path": "/tmp/cua-331351-1778158121708/window-2.png"
+}</code></pre>
+
+      <h3>Workspace Description</h3>
+      <pre><code>$ ./target/debug/cua describe-workspace
+{
+  "compositor": "niri",
+  "workspace": {
+    "id": 1,
+    "idx": 1,
+    "name": null,
+    "output": "Virtual-1",
+    "is_active": true,
+    "is_focused": true,
+    "active_window_id": 2
+  },
+  "screenshot_dir": "/tmp/cua-331353-1778158121805",
+  "composite_screenshot": "/tmp/cua-331353-1778158121805/workspace-1-composite.png",
+  "windows": [
+    {
+      "id": 2,
+      "title": "tic-shell",
+      "app_id": "com.mitchellh.ghostty",
+      "pid": 329714,
+      "is_focused": true,
+      "is_floating": false,
+      "screenshot": "/tmp/cua-331353-1778158121805/window-2.png",
+      "screenshot_error": null,
+      "size": [622, 920]
+    }
+  ]
+}</code></pre>
+
+      <h3>Click</h3>
+      <pre><code>$ ./target/debug/cua click 2 20 20
+{
+  "absolute": {
+    "x": 465,
+    "y": 51
+  },
+  "clicked": {
+    "x": 20,
+    "y": 20
+  },
+  "window_id": 2
+}</code></pre>
+
+      <h3>Scroll</h3>
+      <pre><code>$ ./target/debug/cua scroll 2 down 1 20 20
+{
+  "absolute": {
+    "x": 465,
+    "y": 51
+  },
+  "scrolled": 1,
+  "window_id": 2
+}</code></pre>
+    </section>
+
+    <section>
+      <h2>Verification Notes</h2>
+      <ul>
+        <li><code>cargo check -p niri-ipc -p niri-config</code> passed in the niri fork.</li>
+        <li><code>cargo build</code> passed in <code>cua/</code>.</li>
+        <li><code>niri msg action screenshot-window --help</code> shows <code>--notify &lt;NOTIFY&gt;</code>.</li>
+        <li>Generated screenshot files were written by the compositor user, and the workspace composite was written by the CLI caller.</li>
+      </ul>
+      <div class="callout">
+        The normal screenshot path is non-intrusive for focus and silent for notifications. Input commands still use normal focused input routing because Wayland/niri do not provide background click or multi-cursor semantics for arbitrary clients.
+      </div>
+    </section>
+  </main>
+</body>
+</html>
