@@ -14,6 +14,7 @@ ShellRoot {
   readonly property int paneDividerWidth: 1
   readonly property int railWidth: workspacePaneWidth + paneDividerWidth + agentPaneWidth
   readonly property int collapsedRailWidth: 44
+  readonly property string ticShellRoot: Quickshell.env("TIC_SHELL_ROOT") || (Quickshell.env("HOME") + "/dev/tic-shell")
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/lnx"
   readonly property string stateFile: stateDir + "/workspaces.json"
 
@@ -475,7 +476,7 @@ ShellRoot {
   Process {
     id: codexAgent
 
-    command: ["node", "/home/jettc/osdev/tic-shell/bin/tic-codex-agent"]
+    command: ["node", shell.ticShellRoot + "/bin/tic-codex-agent"]
     workingDirectory: Quickshell.env("HOME") || "/home/jettc"
     stdinEnabled: true
     running: false

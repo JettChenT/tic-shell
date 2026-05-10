@@ -2,8 +2,12 @@
 set -euo pipefail
 
 action="${1:-toggle}"
-config_path="/home/jettc/osdev/tic-shell/shell/agent-sidebar"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+config_path="${TIC_SHELL_SIDEBAR_CONFIG:-$repo_root/shell/agent-sidebar}"
 fallback_qs="/nix/store/iyi8sawnx7w04rq2sva9mxl7bm1xfkjd-quickshell-2026-05-03_d3e26cc/bin/qs"
+
+export TIC_SHELL_ROOT="${TIC_SHELL_ROOT:-$repo_root}"
 
 if command -v qs >/dev/null 2>&1; then
   qs_bin="$(command -v qs)"
