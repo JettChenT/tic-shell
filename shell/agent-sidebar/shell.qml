@@ -505,7 +505,7 @@ ShellRoot {
   Process {
     id: codexAgent
 
-    command: ["node", shell.ticShellRoot + "/bin/tic-codex-agent"]
+    command: ["bun", shell.ticShellRoot + "/bin/tic-codex-agent"]
     workingDirectory: Quickshell.env("HOME") || "/home/jettc"
     stdinEnabled: true
     running: false
