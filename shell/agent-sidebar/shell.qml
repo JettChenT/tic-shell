@@ -12,7 +12,8 @@ ShellRoot {
   readonly property int workspacePaneWidth: 250
   readonly property int agentPaneWidth: 360
   readonly property int paneDividerWidth: 1
-  readonly property int railWidth: workspacePaneWidth + paneDividerWidth + agentPaneWidth
+  readonly property int expandedRailWidth: workspacePaneWidth + (agentPaneCollapsed ? 0 : paneDividerWidth + agentPaneWidth)
+  readonly property int railWidth: sidebarCollapsed ? collapsedRailWidth : expandedRailWidth
   readonly property int collapsedRailWidth: 44
   readonly property string ticShellRoot: Quickshell.env("TIC_SHELL_ROOT") || (Quickshell.env("HOME") + "/dev/tic-shell")
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/lnx"
@@ -26,6 +27,7 @@ ShellRoot {
   property int activeWorkspaceId: -1
   property string activeWorkspaceLabel: "Workspace"
   property bool sidebarCollapsed: false
+  property bool agentPaneCollapsed: false
   property bool stateReady: false
   property string agentStatus: "starting"
   property var agentCommands: []
@@ -381,6 +383,21 @@ ShellRoot {
     scheduleRecenter();
   }
 
+  function showAgentPane() {
+    agentPaneCollapsed = false;
+    scheduleRecenter();
+  }
+
+  function hideAgentPane() {
+    agentPaneCollapsed = true;
+    scheduleRecenter();
+  }
+
+  function toggleAgentPane() {
+    agentPaneCollapsed = !agentPaneCollapsed;
+    scheduleRecenter();
+  }
+
   function scheduleRecenter() {
     recenterTimer.restart();
   }
@@ -471,6 +488,18 @@ ShellRoot {
       shell.hideSidebar();
     }
 
+    function toggleAgent() {
+      shell.toggleAgentPane();
+    }
+
+    function revealAgent() {
+      shell.showAgentPane();
+    }
+
+    function hideAgent() {
+      shell.hideAgentPane();
+    }
+
   }
 
   Process {
@@ -510,12 +539,12 @@ ShellRoot {
     id: panel
 
     color: "#20242c"
-    implicitWidth: shell.sidebarCollapsed ? shell.collapsedRailWidth : shell.railWidth
+    implicitWidth: shell.railWidth
 
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.namespace: "tic-shell-agent-sidebar"
     WlrLayershell.exclusionMode: ExclusionMode.Normal
-    WlrLayershell.exclusiveZone: shell.sidebarCollapsed ? shell.collapsedRailWidth : shell.railWidth
+    WlrLayershell.exclusiveZone: shell.railWidth
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
     anchors {
@@ -576,7 +605,7 @@ ShellRoot {
 
               Text {
                 visible: !shell.sidebarCollapsed
-                width: parent.width - collapseSidebarButton.width - addWorkspaceButton.width - parent.spacing * 2
+                width: parent.width - collapseSidebarButton.width - addWorkspaceButton.width - toggleAgentPaneButton.width - parent.spacing * 3
                 height: parent.height
                 color: "#cad3f5"
                 font.pixelSize: 17
@@ -607,6 +636,31 @@ ShellRoot {
                   anchors.fill: parent
                   hoverEnabled: true
                   onClicked: shell.focusBottomWorkspace()
+                }
+              }
+
+              Rectangle {
+                id: toggleAgentPaneButton
+                visible: !shell.sidebarCollapsed
+                width: 32
+                height: 32
+                radius: 6
+                color: toggleAgentPaneMouse.containsMouse ? "#3a4050" : "#2b303b"
+                border.color: shell.agentPaneCollapsed ? "#596173" : "#8bd5ca"
+
+                Text {
+                  anchors.centerIn: parent
+                  color: shell.agentPaneCollapsed ? "#7f8797" : "#8bd5ca"
+                  font.pixelSize: 13
+                  font.weight: Font.DemiBold
+                  text: "C"
+                }
+
+                MouseArea {
+                  id: toggleAgentPaneMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: shell.toggleAgentPane()
                 }
               }
             }
@@ -860,7 +914,7 @@ ShellRoot {
         }
 
         Rectangle {
-          visible: !shell.sidebarCollapsed
+          visible: !shell.sidebarCollapsed && !shell.agentPaneCollapsed
           width: shell.paneDividerWidth
           height: parent.height
           color: "#3a4050"
@@ -869,7 +923,7 @@ ShellRoot {
         Item {
           id: agentPane
 
-          visible: !shell.sidebarCollapsed
+          visible: !shell.sidebarCollapsed && !shell.agentPaneCollapsed
           width: shell.agentPaneWidth
           height: parent.height
 
