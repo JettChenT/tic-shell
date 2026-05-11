@@ -22,6 +22,12 @@ ShellRoot {
   property var annotations: ({})
   property var agentEvents: []
   property var workspaceRows: []
+  property var windowRows: []
+  property int windowRevision: 0
+  property var windowStructureRows: []
+  property int windowStructureRevision: 0
+  property string lastWorkspaceRowsJson: ""
+  property string lastWindowStructureRowsJson: ""
   property int activeWorkspaceId: -1
   property string activeWorkspaceLabel: "Workspace"
   property bool sidebarCollapsed: false
@@ -207,6 +213,29 @@ ShellRoot {
     }) + "\n");
   }
 
+  function windowsForWorkspace(workspaceId) {
+    return windowStructureRows.filter(win => win.workspaceId === workspaceId);
+  }
+
+  function windowById(windowId) {
+    for (let i = 0; i < windowRows.length; i++) {
+      if (windowRows[i].id === windowId) {
+        return windowRows[i];
+      }
+    }
+    return null;
+  }
+
+  function windowTitle(windowId, revision) {
+    const win = windowById(windowId);
+    return win ? win.title : "(untitled)";
+  }
+
+  function windowFocused(windowId, revision) {
+    const win = windowById(windowId);
+    return win ? win.focused : false;
+  }
+
   function appInitial(appId) {
     const normalized = (appId || "?").replace(/^com\./, "").replace(/^org\./, "");
     const parts = normalized.split(/[.\-_ ]+/).filter(part => part.length > 0);
@@ -275,9 +304,7 @@ ShellRoot {
     });
     let activeWorkspaceId = -1;
 
-    const rows = workspaces.map(ws => {
-      const wsWindows = windows.filter(win => win.workspaceId === ws.id);
-      return {
+    const rows = workspaces.map(ws => ({
         id: ws.id,
         key: workspaceKey(ws.id),
         idx: ws.idx,
@@ -288,10 +315,8 @@ ShellRoot {
         active: ws.active,
         urgent: ws.urgent,
         occupied: ws.occupied,
-        activeWindowId: ws.activeWindowId || 0,
-        windows: wsWindows
-      };
-    });
+        activeWindowId: ws.activeWindowId || 0
+    }));
 
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].focused || rows[i].active) {
@@ -309,7 +334,45 @@ ShellRoot {
       }
     }
 
-    workspaceRows = rows;
+    const nextRowsJson = JSON.stringify(workspaceRowsSignature(rows));
+    if (nextRowsJson !== lastWorkspaceRowsJson) {
+      lastWorkspaceRowsJson = nextRowsJson;
+      workspaceRows = rows;
+    }
+
+    const windowStructureRows = windows.map(win => ({
+      id: win.id,
+      key: win.key,
+      appId: win.appId,
+      workspaceId: win.workspaceId,
+      floating: win.floating,
+      positionX: win.positionX,
+      positionY: win.positionY
+    }));
+    const nextWindowStructureRowsJson = JSON.stringify(windowStructureRows);
+    if (nextWindowStructureRowsJson !== lastWindowStructureRowsJson) {
+      lastWindowStructureRowsJson = nextWindowStructureRowsJson;
+      shell.windowStructureRows = windowStructureRows;
+      windowStructureRevision++;
+    }
+
+    windowRows = windows;
+    windowRevision++;
+  }
+
+  function workspaceRowsSignature(rows) {
+    return rows.map(row => ({
+      id: row.id,
+      idx: row.idx,
+      name: row.name,
+      label: row.label,
+      output: row.output,
+      focused: row.focused,
+      active: row.active,
+      urgent: row.urgent,
+      occupied: row.occupied,
+      activeWindowId: row.activeWindowId
+    }));
   }
 
   function bottomWorkspaceIndex() {
@@ -665,7 +728,7 @@ ShellRoot {
                     id: card
 
                 readonly property var workspace: modelData
-                readonly property var workspaceWindows: workspace.windows || []
+                readonly property var workspaceWindows: shell.windowStructureRevision >= 0 ? shell.windowsForWorkspace(workspace.id) : []
                 readonly property bool current: workspace.id === shell.activeWorkspaceId || workspace.focused || workspace.active || editing
                 readonly property int windowListHeight: workspaceWindows.length * 28 + Math.max(0, workspaceWindows.length - 1) * 4
                 property bool editing: false
@@ -782,12 +845,13 @@ ShellRoot {
 
 	                        readonly property var win: modelData
 	                        readonly property string iconPath: shell.iconForAppId(win.appId)
+                        readonly property bool windowFocused: shell.windowFocused(win.id, shell.windowRevision)
 
                         width: windowList.width
                         height: 28
                         radius: 5
-                        color: win.focused ? "#3d4b4f" : (windowHover.hovered ? "#303642" : "#272d37")
-                        border.color: win.focused ? "#8bd5ca" : "#3a4050"
+                        color: windowFocused ? "#3d4b4f" : (windowHover.hovered ? "#303642" : "#272d37")
+                        border.color: windowFocused ? "#8bd5ca" : "#3a4050"
 
                         Row {
                           anchors.fill: parent
@@ -825,11 +889,11 @@ ShellRoot {
                           Text {
                             width: parent.width - 25
                             height: parent.height
-                            color: win.focused ? "#ffffff" : "#b8c0d6"
+                            color: windowIconRow.windowFocused ? "#ffffff" : "#b8c0d6"
                             font.pixelSize: 12
                             verticalAlignment: Text.AlignVCenter
                             elide: Text.ElideRight
-                            text: win.title
+                            text: shell.windowTitle(win.id, shell.windowRevision)
                           }
                         }
 
