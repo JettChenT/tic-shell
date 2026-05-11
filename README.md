@@ -18,7 +18,10 @@ cua/
   Cargo.toml          Rust CLI package
   src/main.rs         niri computer-use implementation
 shell/agent-sidebar/
-  shell.qml           Quickshell sidebar UI
+  shell.qml           Quickshell sidebar entrypoint
+  Modules/            workspace and Codex pane composition
+  Services/           Niri workspace, annotation, and Codex process state
+  Widgets/            reusable sidebar controls and cards
 tests/
   tic-codex-agent.test.mjs
 designs/

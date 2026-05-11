@@ -4,7 +4,7 @@ This file gives repo-specific instructions for future coding agents working in `
 
 ## Project Shape
 
-- `shell/agent-sidebar/shell.qml` is the Quickshell UI. It owns the niri workspace rail and the embedded agent pane.
+- `shell/agent-sidebar/shell.qml` is the Quickshell entrypoint. `Modules/` owns pane composition, `Services/` owns Niri/annotation/Codex state, and `Widgets/` owns reusable UI pieces.
 - `bin/tic-sidebar` launches or controls the Quickshell sidebar over IPC.
 - `bin/tic-codex-agent` is an executable Bun script. It bridges sidebar JSON messages to a Codex ACP adapter over stdio and exports `createClient` for tests.
 - `tests/tic-codex-agent.test.mjs` runs under `bun test` and imports `bin/tic-codex-agent` directly.
