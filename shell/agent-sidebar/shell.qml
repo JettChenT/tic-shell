@@ -338,6 +338,11 @@ ShellRoot {
     Niri.dispatch(["focus-workspace", String(workspace.idx)]);
   }
 
+  function itemContainsScenePoint(item, scenePoint) {
+    const localPoint = item.mapFromItem(null, scenePoint.x, scenePoint.y);
+    return localPoint.x >= 0 && localPoint.y >= 0 && localPoint.x <= item.width && localPoint.y <= item.height;
+  }
+
   function focusWindow(windowRow) {
     Niri.dispatch(["focus-window", "--id", String(windowRow.id)]);
   }
@@ -661,7 +666,7 @@ ShellRoot {
 
                 readonly property var workspace: modelData
                 readonly property var workspaceWindows: workspace.windows || []
-                readonly property bool current: workspace.id === shell.activeWorkspaceId || workspace.focused || workspace.active
+                readonly property bool current: workspace.id === shell.activeWorkspaceId || workspace.focused || workspace.active || editing
                 readonly property int windowListHeight: workspaceWindows.length * 28 + Math.max(0, workspaceWindows.length - 1) * 4
                 property bool editing: false
 
@@ -679,8 +684,8 @@ ShellRoot {
                 TapHandler {
                   acceptedButtons: Qt.LeftButton
                   gesturePolicy: TapHandler.ReleaseWithinBounds
-                  onTapped: {
-                    if (!card.editing) {
+                  onTapped: function(eventPoint) {
+                    if (!card.editing && !shell.itemContainsScenePoint(annotationInput, eventPoint.scenePosition)) {
                       shell.focusWorkspace(card.workspace);
                     }
                   }
