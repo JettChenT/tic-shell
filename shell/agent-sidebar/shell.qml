@@ -22,8 +22,6 @@ ShellRoot {
   property var annotations: ({})
   property var agentEvents: []
   property var workspaceRows: []
-  property var windowRows: []
-  property int expandedWorkspaceId: -1
   property int activeWorkspaceId: -1
   property string activeWorkspaceLabel: "Workspace"
   property bool sidebarCollapsed: false
@@ -209,27 +207,6 @@ ShellRoot {
     }) + "\n");
   }
 
-  function windowsForWorkspace(workspaceId) {
-    return windowRows.filter(win => win.workspaceId === workspaceId);
-  }
-
-  function appIdsForWorkspace(workspaceId) {
-    return appIdsForWindows(windowsForWorkspace(workspaceId));
-  }
-
-  function appIdsForWindows(wins) {
-    const seen = {};
-    const apps = [];
-    for (let i = 0; i < wins.length; i++) {
-      const appId = wins[i].appId || "app";
-      if (!seen[appId]) {
-        seen[appId] = true;
-        apps.push(appId);
-      }
-    }
-    return apps;
-  }
-
   function appInitial(appId) {
     const normalized = (appId || "?").replace(/^com\./, "").replace(/^org\./, "");
     const parts = normalized.split(/[.\-_ ]+/).filter(part => part.length > 0);
@@ -312,8 +289,7 @@ ShellRoot {
         urgent: ws.urgent,
         occupied: ws.occupied,
         activeWindowId: ws.activeWindowId || 0,
-        windows: wsWindows,
-        appIds: appIdsForWindows(wsWindows)
+        windows: wsWindows
       };
     });
 
@@ -325,7 +301,6 @@ ShellRoot {
     }
 
     if (activeWorkspaceId !== -1) {
-      expandedWorkspaceId = activeWorkspaceId;
       if (activeWorkspaceId !== shell.activeWorkspaceId) {
         shell.activeWorkspaceId = activeWorkspaceId;
         const activeRow = rows.find(row => row.id === activeWorkspaceId);
@@ -334,7 +309,6 @@ ShellRoot {
       }
     }
 
-    windowRows = windows;
     workspaceRows = rows;
   }
 
@@ -687,17 +661,16 @@ ShellRoot {
 
                 readonly property var workspace: modelData
                 readonly property var workspaceWindows: workspace.windows || []
-                readonly property var appIds: workspace.appIds || []
-                readonly property bool expanded: workspace.id === shell.expandedWorkspaceId && workspaceWindows.length > 0
-                readonly property int expandedWindowListHeight: workspaceWindows.length * 28 + Math.max(0, workspaceWindows.length - 1) * 4
+                readonly property bool current: workspace.id === shell.activeWorkspaceId || workspace.focused || workspace.active
+                readonly property int windowListHeight: workspaceWindows.length * 28 + Math.max(0, workspaceWindows.length - 1) * 4
                 property bool editing: false
 
                 width: workspaceColumn.width
-                height: 58 + (appBadgeRow.visible ? appBadgeRow.height + 7 : 0) + (expanded ? expandedWindowListHeight + 8 : 0)
+                height: 58 + (workspaceWindows.length > 0 ? windowListHeight + 8 : emptyWorkspaceLabel.height + 7)
                 radius: 7
-                color: workspace.focused ? "#334044" : (cardHover.hovered ? "#2d3340" : "#252a34")
-                border.color: workspace.urgent ? "#ed8796" : (workspace.focused ? "#8bd5ca" : "#3a4050")
-                border.width: workspace.focused ? 2 : 1
+                color: current ? "#334044" : (cardHover.hovered ? "#2d3340" : "#252a34")
+                border.color: workspace.urgent ? "#ed8796" : (current ? "#8bd5ca" : "#3a4050")
+                border.width: current ? 2 : 1
 
                 HoverHandler {
                   id: cardHover
@@ -727,11 +700,11 @@ ShellRoot {
                       width: 30
                       height: 24
                       radius: 6
-                      color: workspace.focused ? "#8bd5ca" : "#3b4252"
+                      color: current ? "#8bd5ca" : "#3b4252"
 
                       Text {
                         anchors.centerIn: parent
-                        color: workspace.focused ? "#181c22" : "#cad3f5"
+                        color: current ? "#181c22" : "#cad3f5"
                         font.pixelSize: 13
                         font.weight: Font.DemiBold
                         text: workspace.label
@@ -778,60 +751,23 @@ ShellRoot {
                     }
                   }
 
-                  Row {
-                    id: appBadgeRow
+                  Text {
+                    id: emptyWorkspaceLabel
                     width: parent.width
                     height: 20
-                    spacing: 5
-                    visible: !card.expanded
-
-                    Repeater {
-                      model: card.appIds
-
-                      Rectangle {
-                        readonly property string iconPath: shell.iconForAppId(modelData)
-
-                        width: 20
-                        height: 20
-                        radius: 5
-                        color: "#3a4050"
-                        border.color: "#596173"
-
-                        IconImage {
-                          anchors.centerIn: parent
-                          width: 14
-                          height: 14
-                          source: parent.iconPath
-                          visible: parent.iconPath.length > 0
-                          mipmap: true
-                        }
-
-                        Text {
-                          anchors.centerIn: parent
-                          visible: parent.iconPath.length === 0
-                          color: "#a6da95"
-                          font.pixelSize: 11
-                          font.weight: Font.DemiBold
-                          text: shell.appInitial(modelData)
-                        }
-                      }
-                    }
-
-                    Text {
-                      height: parent.height
-                      color: "#7f8797"
-                      font.pixelSize: 12
-                      verticalAlignment: Text.AlignVCenter
-                      text: card.workspaceWindows.length === 0 ? "empty" : card.workspaceWindows.length + " window" + (card.workspaceWindows.length === 1 ? "" : "s")
-                    }
+                    visible: card.workspaceWindows.length === 0
+                    color: "#7f8797"
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                    text: "empty"
                   }
 
                   Column {
                     id: windowList
                     width: parent.width
-                    height: card.expandedWindowListHeight
+                    height: card.windowListHeight
                     spacing: 4
-                    visible: card.expanded
+                    visible: card.workspaceWindows.length > 0
 
                     Repeater {
                       model: card.workspaceWindows
