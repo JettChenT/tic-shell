@@ -29,25 +29,10 @@ Item {
         onClicked: root.shell.toggleSidebar()
       }
 
-      Text {
+      Item {
         visible: !root.shell.sidebarCollapsed
-        width: parent.width - collapseSidebarButton.width - addWorkspaceButton.width - toggleAgentPaneButton.width - parent.spacing * 3
+        width: parent.width - collapseSidebarButton.width - toggleAgentPaneButton.width - parent.spacing
         height: parent.height
-        color: "#cad3f5"
-        font.pixelSize: 17
-        font.weight: Font.DemiBold
-        verticalAlignment: Text.AlignVCenter
-        text: "Workspaces"
-        elide: Text.ElideRight
-      }
-
-      Widgets.SidebarButton {
-        id: addWorkspaceButton
-
-        visible: !root.shell.sidebarCollapsed
-        label: "+"
-        labelSize: 22
-        onClicked: root.shell.focusBottomWorkspace()
       }
 
       Widgets.SidebarButton {
