@@ -4,39 +4,27 @@ set -euo pipefail
 action="${1:-toggle}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
-config_path="${TIC_SHELL_SIDEBAR_CONFIG:-$repo_root/shell/agent-sidebar}"
-fallback_qs="/nix/store/iyi8sawnx7w04rq2sva9mxl7bm1xfkjd-quickshell-2026-05-03_d3e26cc/bin/qs"
+app_bin="${TIC_SHELL_APP_BIN:-$repo_root/target/debug/tic-shell-app}"
 
 export TIC_SHELL_ROOT="${TIC_SHELL_ROOT:-$repo_root}"
 
-if command -v qs >/dev/null 2>&1; then
-  qs_bin="$(command -v qs)"
-elif command -v quickshell >/dev/null 2>&1; then
-  qs_bin="$(command -v quickshell)"
-elif command -v noctalia-shell >/dev/null 2>&1; then
-  qs_bin="$(command -v noctalia-shell)"
-elif [[ -x "$fallback_qs" ]]; then
-  qs_bin="$fallback_qs"
-else
-  echo "tic-sidebar: could not find qs, quickshell, or noctalia-shell" >&2
-  exit 127
-fi
+run_app() {
+  if [[ -x "$app_bin" ]]; then
+    exec "$app_bin" "$@"
+  fi
+
+  exec cargo run --manifest-path "$repo_root/Cargo.toml" --package tic-shell-app -- "$@"
+}
 
 case "$action" in
   start)
-    exec "$qs_bin" -p "$config_path" --daemonize --no-color
+    run_app start
     ;;
-  stop)
-    exec "$qs_bin" kill -p "$config_path"
-    ;;
-  toggle|show|hide)
-    if [[ "$action" == "show" ]]; then
-      action="reveal"
-    fi
-    exec "$qs_bin" ipc -p "$config_path" call sidebar "$action"
+  stop|toggle|show|hide|toggle-agent|show-agent|hide-agent)
+    run_app "$action"
     ;;
   *)
-    echo "usage: tic-sidebar [start|stop|toggle|show|hide]" >&2
+    echo "usage: tic-sidebar [start|stop|toggle|show|hide|toggle-agent|show-agent|hide-agent]" >&2
     exit 64
     ;;
 esac
