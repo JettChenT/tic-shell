@@ -197,6 +197,7 @@ ShellRoot {
   Services.WorkspaceService {
     id: workspaceService
 
+    ticShellRoot: shell.ticShellRoot
     onAgentWorkspaceChanged: {
       shell.activeWorkspaceLabel = workspaceService.activeWorkspaceLabel;
       agentBridge.notifyWorkspace();

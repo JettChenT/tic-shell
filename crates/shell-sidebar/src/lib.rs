@@ -1,13 +1,17 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use agent::{AgentBridge, AgentControl, AgentEvent, AgentUpdate};
 use gpui::{
-    AnyElement, App, Bounds, Context, FocusHandle, FontWeight, MouseButton, ObjectFit, Render,
-    Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, div, img, layer_shell::*, point, prelude::*, px,
+    AnyElement, App, Bounds, Context, Entity, FocusHandle, FontWeight, MouseButton, ObjectFit,
+    Render, Size, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, div, img, layer_shell::*, point, prelude::*, px,
 };
 use persistence::AnnotationStore;
-use services::{NiriClient, NiriWindow, WorkspaceSnapshot};
+use services::{NiriClient, NiriUpdate, NiriWindow, WorkspaceFocus, WorkspaceSnapshot};
 use tic_ui::{DEFAULT_FONT_FAMILY, Theme, sizes};
 use tokio::sync::mpsc;
 
@@ -26,6 +30,8 @@ pub enum SidebarCommand {
 
 pub struct Sidebar {
     snapshot: WorkspaceSnapshot,
+    window_rows: HashMap<u64, Entity<WindowRow>>,
+    window_action_tx: mpsc::UnboundedSender<SidebarAction>,
     annotations: AnnotationStore,
     agent_bridge: Option<AgentBridge>,
     agent_events: Vec<AgentEvent>,
@@ -38,6 +44,238 @@ pub struct Sidebar {
     sidebar_collapsed: bool,
     agent_pane_collapsed: bool,
     prompt: InputBuffer,
+    perf: Option<PerfCounters>,
+}
+
+struct PerfCounters {
+    last_log: Instant,
+    renders: u64,
+    updates: u64,
+    snapshots: u64,
+    window_changes: u64,
+    window_closes: u64,
+    focus_changes: u64,
+}
+
+impl PerfCounters {
+    fn enabled() -> Option<Self> {
+        std::env::var_os("TIC_SIDEBAR_DEBUG_PERF").map(|_| Self {
+            last_log: Instant::now(),
+            renders: 0,
+            updates: 0,
+            snapshots: 0,
+            window_changes: 0,
+            window_closes: 0,
+            focus_changes: 0,
+        })
+    }
+
+    fn maybe_log(&mut self) {
+        if self.last_log.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        eprintln!(
+            "tic-sidebar perf: renders/s={} updates/s={} snapshots={} window_changes={} closes={} focus_changes={}",
+            self.renders,
+            self.updates,
+            self.snapshots,
+            self.window_changes,
+            self.window_closes,
+            self.focus_changes,
+        );
+        self.last_log = Instant::now();
+        self.renders = 0;
+        self.updates = 0;
+        self.snapshots = 0;
+        self.window_changes = 0;
+        self.window_closes = 0;
+        self.focus_changes = 0;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SidebarAction {
+    FocusWindow(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceRenderSignature {
+    id: u64,
+    idx: i64,
+    label: String,
+    output: String,
+    focus: WorkspaceFocus,
+    urgent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowStructureSignature {
+    id: u64,
+    app_id: String,
+    workspace_id: Option<u64>,
+    floating: bool,
+    position_x: i64,
+    position_y: i64,
+}
+
+struct WindowRow {
+    window: NiriWindow,
+    icon_path: Option<PathBuf>,
+    initial: String,
+    last_title_notify: Instant,
+    action_tx: mpsc::UnboundedSender<SidebarAction>,
+}
+
+impl WindowRow {
+    fn new(window: NiriWindow, action_tx: mpsc::UnboundedSender<SidebarAction>) -> Self {
+        let icon_path = services::niri::app_icon_path(&window.app_id);
+        let initial = services::niri::app_initial(&window.app_id);
+        Self {
+            window,
+            icon_path,
+            initial,
+            last_title_notify: Instant::now(),
+            action_tx,
+        }
+    }
+
+    fn update_window(&mut self, window: NiriWindow, cx: &mut Context<Self>) {
+        if self.window == window {
+            return;
+        }
+
+        let app_changed = self.window.app_id != window.app_id;
+        let state_changed = app_changed
+            || self.window.workspace_id != window.workspace_id
+            || self.window.focused != window.focused
+            || self.window.floating != window.floating
+            || self.window.position_x != window.position_x
+            || self.window.position_y != window.position_y;
+        let title_changed = self.window.title != window.title;
+
+        if self.window.app_id != window.app_id {
+            self.icon_path = services::niri::app_icon_path(&window.app_id);
+            self.initial = services::niri::app_initial(&window.app_id);
+        }
+        self.window = window;
+        if state_changed
+            || (title_changed && self.last_title_notify.elapsed() >= Duration::from_secs(1))
+        {
+            self.last_title_notify = Instant::now();
+            cx.notify();
+        }
+    }
+}
+
+impl Render for WindowRow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::default();
+        let window_id = self.window.id;
+        let focused = self.window.focused;
+        let has_icon = self.icon_path.is_some();
+        let icon_path = self.icon_path.clone();
+        let initial = self.initial.clone();
+        let title = self.window.title.clone();
+
+        div()
+            .id(format!("window-{window_id}"))
+            .w_full()
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .px(px(7.0))
+            .py(px(5.0))
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(if focused { theme.accent } else { theme.border })
+            .bg(if focused { theme.accent } else { theme.bg })
+            .text_color(if focused { theme.bg } else { theme.text })
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, _cx| {
+                    let _ = this.action_tx.send(SidebarAction::FocusWindow(window_id));
+                }),
+            )
+            .child(
+                div()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .bg(theme.bg_hover)
+                    .text_size(px(11.0))
+                    .when_some(icon_path, |this, path| {
+                        this.child(
+                            img(path)
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .object_fit(ObjectFit::Contain),
+                        )
+                    })
+                    .when(!has_icon, |this| this.child(initial)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .truncate()
+                    .child(title),
+            )
+    }
+}
+
+fn workspace_render_signature(snapshot: &WorkspaceSnapshot) -> Vec<WorkspaceRenderSignature> {
+    snapshot
+        .workspaces
+        .iter()
+        .map(|workspace| WorkspaceRenderSignature {
+            id: workspace.id,
+            idx: workspace.idx,
+            label: workspace.label.clone(),
+            output: workspace.output.clone(),
+            focus: workspace.focus.clone(),
+            urgent: workspace.urgent,
+        })
+        .collect()
+}
+
+fn window_structure_signature(snapshot: &WorkspaceSnapshot) -> Vec<WindowStructureSignature> {
+    snapshot
+        .windows
+        .iter()
+        .map(window_structure_signature_for)
+        .collect()
+}
+
+fn window_structure_signature_for(window: &NiriWindow) -> WindowStructureSignature {
+    WindowStructureSignature {
+        id: window.id,
+        app_id: window.app_id.clone(),
+        workspace_id: window.workspace_id,
+        floating: window.floating,
+        position_x: window.position_x,
+        position_y: window.position_y,
+    }
+}
+
+fn sort_sidebar_windows(windows: &mut [NiriWindow]) {
+    windows.sort_by(|a, b| {
+        a.workspace_id
+            .cmp(&b.workspace_id)
+            .then(a.position_x.cmp(&b.position_x))
+            .then(a.position_y.cmp(&b.position_y))
+            .then(a.id.cmp(&b.id))
+    });
 }
 
 impl Sidebar {
@@ -48,8 +286,11 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> Self {
         let snapshot = NiriClient::snapshot().unwrap_or_default();
+        let (window_action_tx, window_action_rx) = mpsc::unbounded_channel();
         let mut sidebar = Self {
-            snapshot,
+            snapshot: WorkspaceSnapshot::default(),
+            window_rows: HashMap::new(),
+            window_action_tx,
             annotations,
             agent_bridge,
             agent_events: Vec::new(),
@@ -62,7 +303,10 @@ impl Sidebar {
             sidebar_collapsed: false,
             agent_pane_collapsed: true,
             prompt: InputBuffer::default(),
+            perf: PerfCounters::enabled(),
         };
+        sidebar.apply_snapshot(snapshot, cx);
+        sidebar.start_window_actions(window_action_rx, cx);
         sidebar.start_niri_events(cx);
         if let Some(rx) = agent_updates {
             sidebar.start_agent_updates(rx, cx);
@@ -95,27 +339,16 @@ impl Sidebar {
         cx.notify();
     }
 
-    fn start_niri_events(&mut self, cx: &mut Context<Self>) {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            while !tx.is_closed() {
-                if let Err(err) = NiriClient::stream_snapshots(tx.clone()).await {
-                    tracing::debug!("niri event stream unavailable: {err:#}");
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-            }
-        });
-
+    fn start_window_actions(
+        &mut self,
+        mut rx: mpsc::UnboundedReceiver<SidebarAction>,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            while let Some(snapshot) = rx.recv().await {
+            while let Some(action) = rx.recv().await {
                 if this
-                    .update(cx, |this, cx| {
-                        let previous_key = this.agent_workspace_key();
-                        this.snapshot = snapshot;
-                        if previous_key != this.agent_workspace_key() {
-                            this.notify_agent_workspace();
-                        }
-                        cx.notify();
+                    .update(cx, |this, cx| match action {
+                        SidebarAction::FocusWindow(id) => this.focus_window(id, cx),
                     })
                     .is_err()
                 {
@@ -124,6 +357,152 @@ impl Sidebar {
             }
         })
         .detach();
+    }
+
+    fn start_niri_events(&mut self, cx: &mut Context<Self>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while !tx.is_closed() {
+                if let Err(err) = NiriClient::stream_updates(tx.clone()).await {
+                    tracing::debug!("niri event stream unavailable: {err:#}");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.apply_niri_update(update, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn apply_niri_update(&mut self, update: NiriUpdate, cx: &mut Context<Self>) {
+        if let Some(perf) = &mut self.perf {
+            perf.updates += 1;
+            match &update {
+                NiriUpdate::Snapshot(_) => perf.snapshots += 1,
+                NiriUpdate::WindowChanged(_) => perf.window_changes += 1,
+                NiriUpdate::WindowClosed(_) => perf.window_closes += 1,
+                NiriUpdate::WindowFocusChanged(_) => perf.focus_changes += 1,
+            }
+            perf.maybe_log();
+        }
+        match update {
+            NiriUpdate::Snapshot(snapshot) => self.apply_snapshot(snapshot, cx),
+            NiriUpdate::WindowChanged(window) => self.apply_window_changed(window, cx),
+            NiriUpdate::WindowClosed(id) => self.apply_window_closed(id, cx),
+            NiriUpdate::WindowFocusChanged(id) => self.apply_window_focus_changed(id, cx),
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot, cx: &mut Context<Self>) {
+        let previous_key = self.agent_workspace_key();
+        let root_dirty = workspace_render_signature(&self.snapshot)
+            != workspace_render_signature(&snapshot)
+            || window_structure_signature(&self.snapshot) != window_structure_signature(&snapshot);
+
+        let mut seen = HashSet::new();
+        for window in &snapshot.windows {
+            seen.insert(window.id);
+            if let Some(row) = self.window_rows.get(&window.id) {
+                let window = window.clone();
+                let _ = row.update(cx, |row, cx| row.update_window(window, cx));
+            } else {
+                let action_tx = self.window_action_tx.clone();
+                let window = window.clone();
+                let window_id = window.id;
+                let row = cx.new(|_| WindowRow::new(window, action_tx));
+                self.window_rows.insert(window_id, row);
+            }
+        }
+        self.window_rows
+            .retain(|window_id, _row| seen.contains(window_id));
+
+        self.snapshot = snapshot;
+        if previous_key != self.agent_workspace_key() {
+            self.notify_agent_workspace();
+        }
+        if root_dirty {
+            cx.notify();
+        }
+    }
+
+    fn apply_window_changed(&mut self, window: NiriWindow, cx: &mut Context<Self>) {
+        let previous = self
+            .snapshot
+            .windows
+            .iter()
+            .find(|existing| existing.id == window.id)
+            .cloned();
+        let root_dirty = previous.as_ref().is_none_or(|previous| {
+            window_structure_signature_for(previous) != window_structure_signature_for(&window)
+        });
+
+        if window.focused {
+            for existing in &mut self.snapshot.windows {
+                existing.focused = false;
+            }
+        }
+        if let Some(existing) = self
+            .snapshot
+            .windows
+            .iter_mut()
+            .find(|existing| existing.id == window.id)
+        {
+            *existing = window.clone();
+        } else {
+            self.snapshot.windows.push(window.clone());
+        }
+        sort_sidebar_windows(&mut self.snapshot.windows);
+
+        if let Some(row) = self.window_rows.get(&window.id) {
+            let _ = row.update(cx, |row, cx| row.update_window(window, cx));
+        } else {
+            let action_tx = self.window_action_tx.clone();
+            let window_id = window.id;
+            let row = cx.new(|_| WindowRow::new(window, action_tx));
+            self.window_rows.insert(window_id, row);
+        }
+
+        if root_dirty {
+            cx.notify();
+        }
+    }
+
+    fn apply_window_closed(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.snapshot.windows.retain(|window| window.id != id);
+        self.window_rows.remove(&id);
+        for workspace in &mut self.snapshot.workspaces {
+            if workspace.active_window_id == Some(id) {
+                workspace.active_window_id = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_window_focus_changed(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
+        let mut changed = Vec::new();
+        for window in &mut self.snapshot.windows {
+            let focused = Some(window.id) == id;
+            if window.focused != focused {
+                window.focused = focused;
+                changed.push(window.clone());
+            }
+        }
+        for window in changed {
+            if let Some(row) = self.window_rows.get(&window.id) {
+                let _ = row.update(cx, |row, cx| row.update_window(window, cx));
+            }
+        }
     }
 
     fn start_agent_updates(
@@ -222,10 +601,6 @@ impl Sidebar {
         workspace.focus.is_current()
     }
 
-    fn effective_window_focused(&self, window: &NiriWindow) -> bool {
-        window.focused
-    }
-
     fn focus_workspace(&mut self, idx: i64, cx: &mut Context<Self>) {
         let action = cx.background_spawn(async move { NiriClient::focus_workspace(idx) });
         cx.spawn(async move |this, cx| match action.await {
@@ -254,12 +629,12 @@ impl Sidebar {
         .detach();
     }
 
-    fn windows_for_workspace_owned(&self, workspace_id: u64) -> Vec<NiriWindow> {
+    fn window_rows_for_workspace(&self, workspace_id: u64) -> Vec<Entity<WindowRow>> {
         self.snapshot
             .windows
             .iter()
             .filter(|window| window.workspace_id == Some(workspace_id))
-            .cloned()
+            .filter_map(|window| self.window_rows.get(&window.id).cloned())
             .collect()
     }
 
@@ -375,7 +750,7 @@ impl Sidebar {
                 let workspace_id = workspace.id;
                 let idx = workspace.idx;
                 let current = self.effective_workspace_current(workspace);
-                let windows = self.windows_for_workspace_owned(workspace_id);
+                let windows = self.window_rows_for_workspace(workspace_id);
                 let annotation_value = self
                     .annotations
                     .annotation_for_workspace(workspace_id)
@@ -510,11 +885,7 @@ impl Sidebar {
                                 .child("empty"),
                         )
                     })
-                    .children(
-                        windows
-                            .into_iter()
-                            .map(|window| self.render_window_row(&window, theme, cx)),
-                    )
+                    .children(windows.into_iter().map(|window| window.into_any_element()))
                     .into_any_element()
             })
             .collect();
@@ -584,72 +955,6 @@ impl Sidebar {
                         .children(rows),
                 )
             })
-            .into_any_element()
-    }
-
-    fn render_window_row(
-        &self,
-        window: &NiriWindow,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let window_id = window.id;
-        let initial = services::niri::app_initial(&window.app_id);
-        let icon_path = services::niri::app_icon_path(&window.app_id);
-        let has_icon = icon_path.is_some();
-        let focused = self.effective_window_focused(window);
-        div()
-            .id(format!("window-{window_id}"))
-            .w_full()
-            .h(px(28.0))
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .px(px(7.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .bg(if focused { theme.accent } else { theme.bg })
-            .text_color(if focused { theme.bg } else { theme.text })
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| this.focus_window(window_id, cx)),
-            )
-            .child(
-                div()
-                    .w(px(18.0))
-                    .h(px(18.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .bg(theme.bg_hover)
-                    .text_size(px(11.0))
-                    .when_some(icon_path, |this, path| {
-                        this.child(
-                            img(path)
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .object_fit(ObjectFit::Contain),
-                        )
-                    })
-                    .when(!has_icon, |this| this.child(initial)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .truncate()
-                    .child(window.title.clone()),
-            )
             .into_any_element()
     }
 
@@ -780,11 +1085,11 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::default();
-        let desired = Size::new(px(self.visible_width()), window.viewport_size().height);
-        if window.viewport_size() != desired {
-            window.resize(desired);
+        if let Some(perf) = &mut self.perf {
+            perf.renders += 1;
+            perf.maybe_log();
         }
+        let theme = Theme::default();
         if self.annotation_focus_out.is_none() {
             self.annotation_focus_out = Some(cx.on_focus_out(
                 &self.annotation_focus,
@@ -862,7 +1167,7 @@ pub fn window_options(display_id: Option<gpui::DisplayId>, width: f32, cx: &App)
             size: Size::new(px(width), display_size.height),
         })),
         app_id: Some(APP_ID.to_string()),
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: WindowBackgroundAppearance::Opaque,
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace: "tic-shell-agent-sidebar".to_string(),
             layer: Layer::Top,

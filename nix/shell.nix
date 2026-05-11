@@ -14,6 +14,7 @@
   glibc,
   grim,
   gtk3,
+  just,
   libpulseaudio,
   libx11,
   libxkbcommon,
@@ -26,6 +27,7 @@
   pango,
   pipewire,
   pkg-config,
+  quickshell,
   rustc,
   rustfmt,
   systemd,
@@ -39,9 +41,11 @@ mkShell rec {
     cargo
     clang-tools
     grim
+    just
     niri
     nixd
     nixfmt
+    quickshell
     rustc
     rustfmt
   ];

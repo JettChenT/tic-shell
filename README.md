@@ -2,8 +2,8 @@
 
 `tic-shell` is a local Wayland/niri shell experiment. It currently contains:
 
-- a Rust/GPUI left sidebar for niri workspaces and an embedded Codex ACP chat pane
-- the previous Quickshell sidebar kept under `shell/agent-sidebar/` as a behavior reference
+- a Quickshell/QML left sidebar for niri workspaces and an embedded Codex ACP chat pane
+- a Rust `tic-sidebar-core` daemon that streams niri workspace/window state to QML over JSON lines
 - a Bun-powered ACP client bridge used by the sidebar
 - a Rust `cua` CLI for niri-focused computer-use actions such as workspace description, screenshots, clicks, typing, and scrolling
 
@@ -13,11 +13,12 @@ The project is intentionally small and local-first. Most runtime behavior assume
 
 ```text
 bin/
-  tic-sidebar          Rust/GPUI launcher and IPC wrapper
+  tic-sidebar          Quickshell launcher and IPC wrapper
   tic-codex-agent     Bun bridge between the sidebar and a Codex ACP adapter
 crates/
-  app/                GPUI application, layer-shell window, and sidebar IPC
-  shell-sidebar/      GPUI workspace rail and Codex rail
+  sidebar-core/       Rust JSONL daemon for niri workspace/window state and actions
+  app/                legacy GPUI application entrypoint
+  shell-sidebar/      legacy GPUI workspace rail and Codex rail
   services/           niri workspace/window state and actions
   agent/              typed Rust wrapper around the Codex ACP bridge process
   persistence/        workspace annotation persistence
@@ -26,10 +27,10 @@ cua/
   Cargo.toml          Rust CLI package
   src/main.rs         niri computer-use implementation
 shell/agent-sidebar/
-  shell.qml           previous Quickshell sidebar entrypoint
-  Modules/            previous workspace and Codex pane composition
-  Services/           previous Niri workspace, annotation, and Codex process state
-  Widgets/            previous reusable sidebar controls and cards
+  shell.qml           Quickshell sidebar entrypoint
+  Modules/            workspace and Codex pane composition
+  Services/           Rust-core workspace process, annotation, and Codex process state
+  Widgets/            reusable sidebar controls and cards
 tests/
   tic-codex-agent.test.mjs
 designs/
@@ -43,12 +44,13 @@ docs/
 Runtime requirements depend on the component:
 
 - `bun` for `bin/tic-codex-agent` and its tests
-- `cargo`/Rust for the GPUI sidebar and `cua` CLI
+- `cargo`/Rust for `tic-sidebar-core` and the `cua` CLI
+- `qs` or `quickshell` for the QML sidebar
 - `niri` for compositor IPC
 - `codex-acp`, or `bunx` to run `@zed-industries/codex-acp`
 - `grim` and Linux `uinput` support for some `cua` screenshot/input actions
 
-The Rust sidebar uses GPUI's Wayland layer-shell support and talks to niri with `niri msg --json`.
+The QML sidebar uses Quickshell's Wayland layer-shell support. Workspace/window state comes from `tic-sidebar-core` over JSON lines.
 
 ## Development Commands
 

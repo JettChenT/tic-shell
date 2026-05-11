@@ -1,5 +1,6 @@
 pub mod niri;
 
 pub use niri::{
-    NiriClient, NiriWindow, NiriWorkspace, ShellWindow, WorkspaceFocus, WorkspaceSnapshot,
+    NiriClient, NiriUpdate, NiriWindow, NiriWorkspace, ShellWindow, WorkspaceFocus,
+    WorkspaceSnapshot,
 };

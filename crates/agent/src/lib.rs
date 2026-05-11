@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, Command},
+    process::{Child, ChildStdin, Command},
     sync::{Mutex, mpsc},
 };
 
@@ -126,6 +126,7 @@ enum BridgeLine {
 #[derive(Clone)]
 pub struct AgentBridge {
     stdin: Arc<Mutex<ChildStdin>>,
+    _child: Arc<Mutex<Child>>,
 }
 
 impl AgentBridge {
@@ -134,7 +135,8 @@ impl AgentBridge {
         workdir: PathBuf,
     ) -> Result<(Self, mpsc::UnboundedReceiver<AgentUpdate>)> {
         let bridge = repo_root.join("bin/tic-codex-agent");
-        let mut child = Command::new("bun")
+        let mut command = Command::new("bun");
+        command
             .arg(&bridge)
             .current_dir(&workdir)
             .env("TIC_CODEX_WORKDIR", &workdir)
@@ -142,6 +144,8 @@ impl AgentBridge {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn {}", bridge.display()))?;
 
@@ -165,6 +169,7 @@ impl AgentBridge {
         Ok((
             Self {
                 stdin: Arc::new(Mutex::new(stdin)),
+                _child: Arc::new(Mutex::new(child)),
             },
             rx,
         ))

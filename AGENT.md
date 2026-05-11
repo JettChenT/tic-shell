@@ -4,13 +4,14 @@ This file gives repo-specific instructions for future coding agents working in `
 
 ## Project Shape
 
-- `crates/app` is the Rust/GPUI application entrypoint. It opens the sidebar as a Wayland layer-shell surface and owns sidebar IPC.
-- `crates/shell-sidebar` renders the GPUI workspace rail and Codex rail.
+- `shell/agent-sidebar/shell.qml` is the Quickshell/QML sidebar entrypoint. It owns the Wayland layer-shell UI.
+- `crates/sidebar-core` is the Rust JSONL daemon used by QML for niri workspace/window state and actions.
+- `crates/app` is the legacy Rust/GPUI application entrypoint.
+- `crates/shell-sidebar` is the legacy GPUI workspace rail and Codex rail.
 - `crates/services` owns niri workspace/window state and niri actions.
 - `crates/agent` owns the typed Rust process wrapper around `bin/tic-codex-agent`.
 - `crates/persistence` owns workspace annotations in the existing JSON shape.
-- `shell/agent-sidebar/shell.qml` is the previous Quickshell entrypoint kept as a behavior reference.
-- `bin/tic-sidebar` launches or controls the Rust/GPUI sidebar over IPC.
+- `bin/tic-sidebar` launches or controls the Quickshell sidebar over Quickshell IPC.
 - `bin/tic-codex-agent` is an executable Bun script. It bridges sidebar JSON messages to a Codex ACP adapter over stdio and exports `createClient` for tests.
 - `tests/tic-codex-agent.test.mjs` runs under `bun test` and imports `bin/tic-codex-agent` directly.
 - `cua/` is a standalone Rust package for niri computer-use actions.
@@ -50,8 +51,9 @@ niri msg --json layers
 - The sidebar reserves space through layer-shell exclusive-zone behavior. Do not add or recommend a niri left strut for the same sidebar reservation.
 - The shell namespace is `tic-shell-agent-sidebar`.
 - `TIC_SHELL_ROOT` controls where the Rust app looks for repo scripts.
-- The Rust app starts `bun <TIC_SHELL_ROOT>/bin/tic-codex-agent`.
-- The agent bridge defaults `TIC_CODEX_WORKDIR` to the user's home directory when started by the Rust sidebar.
+- QML starts `target/release/tic-sidebar-core` for niri workspace/window state.
+- QML starts `bun <TIC_SHELL_ROOT>/bin/tic-codex-agent` for the agent pane.
+- The agent bridge defaults `TIC_CODEX_WORKDIR` to the user's home directory when started by the QML sidebar.
 
 ## ACP Bridge Notes
 
@@ -72,6 +74,6 @@ niri msg --json layers
 
 - For Bun bridge changes, run `bun test tests/tic-codex-agent.test.mjs`.
 - For Rust CLI changes, run `cargo check --manifest-path cua/Cargo.toml`.
-- For Rust sidebar changes, run `cargo check --workspace`; when possible, run the sidebar in a niri session and inspect `niri msg --json layers`.
-- For old QML reference changes, static checks are limited.
+- For Rust sidebar-core changes, run `cargo check -p tic-sidebar-core`; when possible, run the sidebar in a niri session and inspect `niri msg --json layers`.
+- For QML sidebar changes, static checks are limited unless Quickshell is installed in the environment.
 - If a check cannot run because the environment lacks niri, Quickshell, or input permissions, report that explicitly.

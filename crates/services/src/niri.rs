@@ -4,10 +4,12 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command as TokioCommand,
@@ -61,7 +63,15 @@ pub struct WorkspaceSnapshot {
     pub active_workspace_label: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NiriUpdate {
+    Snapshot(WorkspaceSnapshot),
+    WindowChanged(NiriWindow),
+    WindowClosed(u64),
+    WindowFocusChanged(Option<u64>),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawWorkspace {
     id: u64,
     idx: i64,
@@ -79,7 +89,7 @@ struct RawWorkspace {
     urgent: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawWindow {
     id: u64,
     #[serde(default)]
@@ -96,7 +106,7 @@ struct RawWindow {
     layout: Option<RawWindowLayout>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawWindowLayout {
     #[serde(default)]
     pos_in_scrolling_layout: Option<[i64; 2]>,
@@ -123,7 +133,7 @@ impl NiriClient {
         niri_action(["expand-column-to-available-width"])
     }
 
-    pub async fn stream_snapshots(sender: mpsc::UnboundedSender<WorkspaceSnapshot>) -> Result<()> {
+    pub async fn stream_updates(sender: mpsc::UnboundedSender<NiriUpdate>) -> Result<()> {
         let mut child = TokioCommand::new("niri")
             .args(["msg", "--json", "event-stream"])
             .stdout(Stdio::piped())
@@ -137,11 +147,8 @@ impl NiriClient {
             .context("niri event-stream did not provide stdout")?;
         let mut lines = BufReader::new(stdout).lines();
 
-        let snapshot = Self::snapshot().context("failed to refresh initial niri snapshot")?;
-        if sender.send(snapshot).is_err() {
-            let _ = child.kill().await;
-            return Ok(());
-        }
+        let mut snapshot = Self::snapshot().unwrap_or_default();
+        let mut last_title_send_by_window = HashMap::new();
 
         while let Some(line) = lines
             .next_line()
@@ -152,9 +159,13 @@ impl NiriClient {
                 continue;
             }
 
-            let snapshot =
-                Self::snapshot().context("failed to refresh niri snapshot after event")?;
-            if sender.send(snapshot).is_err() {
+            let Some(update) = apply_event(&mut snapshot, &line, &mut last_title_send_by_window)
+                .context("failed to apply niri event")?
+            else {
+                continue;
+            };
+
+            if sender.send(update).is_err() {
                 let _ = child.kill().await;
                 return Ok(());
             }
@@ -170,6 +181,187 @@ impl NiriClient {
 
         Ok(())
     }
+}
+
+fn apply_event(
+    snapshot: &mut WorkspaceSnapshot,
+    line: &str,
+    last_title_send_by_window: &mut HashMap<u64, Instant>,
+) -> Result<Option<NiriUpdate>> {
+    let event: Value = serde_json::from_str(line).context("failed to parse niri event")?;
+
+    if let Some(payload) = event.get("WorkspacesChanged") {
+        let workspaces = payload
+            .get("workspaces")
+            .cloned()
+            .context("WorkspacesChanged missing workspaces")?;
+        snapshot.workspaces = sort_workspaces(
+            serde_json::from_value::<Vec<RawWorkspace>>(workspaces)?
+                .into_iter()
+                .map(map_workspace)
+                .collect(),
+        );
+        refresh_active_workspace(snapshot);
+        return Ok(Some(NiriUpdate::Snapshot(snapshot.clone())));
+    }
+
+    if let Some(payload) = event.get("WorkspaceActivated") {
+        let id = payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .context("WorkspaceActivated missing id")?;
+        let focused = payload
+            .get("focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        activate_workspace(snapshot, id, focused);
+        refresh_active_workspace(snapshot);
+        return Ok(Some(NiriUpdate::Snapshot(snapshot.clone())));
+    }
+
+    if let Some(payload) = event.get("WorkspaceActiveWindowChanged") {
+        let workspace_id = payload
+            .get("workspace_id")
+            .and_then(Value::as_u64)
+            .context("WorkspaceActiveWindowChanged missing workspace_id")?;
+        let active_window_id = payload.get("active_window_id").and_then(Value::as_u64);
+        if let Some(workspace) = snapshot
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        {
+            workspace.active_window_id = active_window_id;
+        }
+        return Ok(Some(NiriUpdate::Snapshot(snapshot.clone())));
+    }
+
+    if let Some(payload) = event.get("WorkspaceUrgencyChanged") {
+        let id = payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .context("WorkspaceUrgencyChanged missing id")?;
+        let urgent = payload
+            .get("urgent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if let Some(workspace) = snapshot
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == id)
+        {
+            workspace.urgent = urgent;
+        }
+        return Ok(Some(NiriUpdate::Snapshot(snapshot.clone())));
+    }
+
+    if let Some(payload) = event.get("WindowsChanged") {
+        let windows = payload
+            .get("windows")
+            .cloned()
+            .context("WindowsChanged missing windows")?;
+        snapshot.windows = sort_windows(
+            serde_json::from_value::<Vec<RawWindow>>(windows)?
+                .into_iter()
+                .map(map_window)
+                .collect(),
+        );
+        return Ok(Some(NiriUpdate::Snapshot(snapshot.clone())));
+    }
+
+    if let Some(payload) = event.get("WindowOpenedOrChanged") {
+        let raw = payload
+            .get("window")
+            .cloned()
+            .context("WindowOpenedOrChanged missing window")?;
+        let window = map_window(serde_json::from_value(raw)?);
+        if snapshot
+            .windows
+            .iter()
+            .any(|existing| existing == &window)
+        {
+            return Ok(None);
+        }
+        let title_only = snapshot
+            .windows
+            .iter()
+            .find(|existing| existing.id == window.id)
+            .is_some_and(|existing| title_only_changed(existing, &window));
+        upsert_window(snapshot, window.clone());
+        if title_only {
+            let last_send = last_title_send_by_window
+                .entry(window.id)
+                .or_insert_with(|| Instant::now() - Duration::from_secs(1));
+            if last_send.elapsed() < Duration::from_secs(1) {
+                return Ok(None);
+            }
+            *last_send = Instant::now();
+        } else {
+            last_title_send_by_window.remove(&window.id);
+        }
+        return Ok(Some(NiriUpdate::WindowChanged(window)));
+    }
+
+    if let Some(payload) = event.get("WindowClosed") {
+        let id = payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .context("WindowClosed missing id")?;
+        snapshot.windows.retain(|window| window.id != id);
+        last_title_send_by_window.remove(&id);
+        for workspace in &mut snapshot.workspaces {
+            if workspace.active_window_id == Some(id) {
+                workspace.active_window_id = None;
+            }
+        }
+        return Ok(Some(NiriUpdate::WindowClosed(id)));
+    }
+
+    if let Some(payload) = event.get("WindowFocusChanged") {
+        let id = payload.get("id").and_then(Value::as_u64);
+        for window in &mut snapshot.windows {
+            window.focused = Some(window.id) == id;
+        }
+        return Ok(Some(NiriUpdate::WindowFocusChanged(id)));
+    }
+
+    if let Some(payload) = event.get("WindowUrgencyChanged") {
+        let id = payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .context("WindowUrgencyChanged missing id")?;
+        let urgent = payload
+            .get("urgent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if urgent {
+            if let Some(workspace_id) = snapshot
+                .windows
+                .iter()
+                .find(|window| window.id == id)
+                .and_then(|window| window.workspace_id)
+                && let Some(workspace) = snapshot
+                    .workspaces
+                    .iter_mut()
+                    .find(|workspace| workspace.id == workspace_id)
+            {
+                workspace.urgent = true;
+            }
+        }
+        return Ok(Some(NiriUpdate::Snapshot(snapshot.clone())));
+    }
+
+    Ok(None)
+}
+
+fn title_only_changed(previous: &NiriWindow, next: &NiriWindow) -> bool {
+    previous.title != next.title
+        && previous.id == next.id
+        && previous.app_id == next.app_id
+        && previous.workspace_id == next.workspace_id
+        && previous.focused == next.focused
+        && previous.floating == next.floating
+        && previous.position_x == next.position_x
+        && previous.position_y == next.position_y
 }
 
 fn niri_json(kind: &str) -> Result<String> {
@@ -202,22 +394,47 @@ fn niri_action<const N: usize>(args: [&str; N]) -> Result<()> {
 }
 
 pub fn snapshot_from_json(workspaces_json: &str, windows_json: &str) -> Result<WorkspaceSnapshot> {
-    let mut workspaces: Vec<NiriWorkspace> =
+    let workspaces: Vec<NiriWorkspace> =
         serde_json::from_str::<Vec<RawWorkspace>>(workspaces_json)?
             .into_iter()
             .map(map_workspace)
             .collect();
+
+    let windows: Vec<NiriWindow> = serde_json::from_str::<Vec<RawWindow>>(windows_json)?
+        .into_iter()
+        .map(map_window)
+        .collect();
+
+    Ok(snapshot_from_parts(
+        sort_workspaces(workspaces),
+        sort_windows(windows),
+    ))
+}
+
+fn snapshot_from_parts(
+    workspaces: Vec<NiriWorkspace>,
+    windows: Vec<NiriWindow>,
+) -> WorkspaceSnapshot {
+    let mut snapshot = WorkspaceSnapshot {
+        workspaces,
+        windows,
+        ..WorkspaceSnapshot::default()
+    };
+    refresh_active_workspace(&mut snapshot);
+    snapshot
+}
+
+fn sort_workspaces(mut workspaces: Vec<NiriWorkspace>) -> Vec<NiriWorkspace> {
     workspaces.sort_by(|a, b| {
         a.output
             .cmp(&b.output)
             .then(a.idx.cmp(&b.idx))
             .then(a.id.cmp(&b.id))
     });
+    workspaces
+}
 
-    let mut windows: Vec<NiriWindow> = serde_json::from_str::<Vec<RawWindow>>(windows_json)?
-        .into_iter()
-        .map(map_window)
-        .collect();
+fn sort_windows(mut windows: Vec<NiriWindow>) -> Vec<NiriWindow> {
     windows.sort_by(|a, b| {
         a.workspace_id
             .cmp(&b.workspace_id)
@@ -225,24 +442,73 @@ pub fn snapshot_from_json(workspaces_json: &str, windows_json: &str) -> Result<W
             .then(a.position_y.cmp(&b.position_y))
             .then(a.id.cmp(&b.id))
     });
+    windows
+}
 
-    let active = workspaces
+fn refresh_active_workspace(snapshot: &mut WorkspaceSnapshot) {
+    let active = snapshot
+        .workspaces
         .iter()
         .find(|w| matches!(w.focus, WorkspaceFocus::Focused));
     let active = active.or_else(|| {
-        workspaces
+        snapshot
+            .workspaces
             .iter()
             .find(|w| matches!(w.focus, WorkspaceFocus::Active))
     });
 
-    Ok(WorkspaceSnapshot {
-        active_workspace_id: active.map(|w| w.id),
-        active_workspace_label: active
-            .map(|w| w.label.clone())
-            .unwrap_or_else(|| "Workspace".to_string()),
-        workspaces,
-        windows,
-    })
+    snapshot.active_workspace_id = active.map(|w| w.id);
+    snapshot.active_workspace_label = active
+        .map(|w| w.label.clone())
+        .unwrap_or_else(|| "Workspace".to_string());
+}
+
+fn activate_workspace(snapshot: &mut WorkspaceSnapshot, id: u64, focused: bool) {
+    let output = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == id)
+        .map(|workspace| workspace.output.clone());
+
+    for workspace in &mut snapshot.workspaces {
+        if focused && matches!(workspace.focus, WorkspaceFocus::Focused) {
+            workspace.focus = WorkspaceFocus::Inactive;
+        }
+
+        if output
+            .as_ref()
+            .is_some_and(|output| *output == workspace.output && workspace.focus.is_current())
+        {
+            workspace.focus = WorkspaceFocus::Inactive;
+        }
+
+        if workspace.id == id {
+            workspace.focus = if focused {
+                WorkspaceFocus::Focused
+            } else {
+                WorkspaceFocus::Active
+            };
+        }
+    }
+}
+
+fn upsert_window(snapshot: &mut WorkspaceSnapshot, window: NiriWindow) {
+    if window.focused {
+        for existing in &mut snapshot.windows {
+            existing.focused = false;
+        }
+    }
+
+    if let Some(existing) = snapshot
+        .windows
+        .iter_mut()
+        .find(|existing| existing.id == window.id)
+    {
+        *existing = window;
+    } else {
+        snapshot.windows.push(window);
+    }
+    snapshot.windows = sort_windows(std::mem::take(&mut snapshot.windows));
 }
 
 fn map_workspace(raw: RawWorkspace) -> NiriWorkspace {
