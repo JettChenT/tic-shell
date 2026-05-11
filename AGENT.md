@@ -5,7 +5,6 @@ This file gives repo-specific instructions for future coding agents working in `
 ## Project Shape
 
 - `shell/agent-sidebar/shell.qml` is the Quickshell/QML sidebar entrypoint. It owns the Wayland layer-shell UI.
-- `crates/sidebar-core` is the Rust JSONL daemon used by QML for niri workspace/window state and actions.
 - `crates/app` is the legacy Rust/GPUI application entrypoint.
 - `crates/shell-sidebar` is the legacy GPUI workspace rail and Codex rail.
 - `crates/services` owns niri workspace/window state and niri actions.
@@ -51,7 +50,7 @@ niri msg --json layers
 - The sidebar reserves space through layer-shell exclusive-zone behavior. Do not add or recommend a niri left strut for the same sidebar reservation.
 - The shell namespace is `tic-shell-agent-sidebar`.
 - `TIC_SHELL_ROOT` controls where the Rust app looks for repo scripts.
-- QML starts `target/release/tic-sidebar-core` for niri workspace/window state.
+- QML uses Quickshell's native Niri service for workspace/window/title state and niri actions.
 - QML starts `bun <TIC_SHELL_ROOT>/bin/tic-codex-agent` for the agent pane.
 - The agent bridge defaults `TIC_CODEX_WORKDIR` to the user's home directory when started by the QML sidebar.
 
@@ -74,6 +73,6 @@ niri msg --json layers
 
 - For Bun bridge changes, run `bun test tests/tic-codex-agent.test.mjs`.
 - For Rust CLI changes, run `cargo check --manifest-path cua/Cargo.toml`.
-- For Rust sidebar-core changes, run `cargo check -p tic-sidebar-core`; when possible, run the sidebar in a niri session and inspect `niri msg --json layers`.
+- For Rust workspace changes, run `cargo check --workspace`; when possible, run the sidebar in a niri session and inspect `niri msg --json layers`.
 - For QML sidebar changes, static checks are limited unless Quickshell is installed in the environment.
 - If a check cannot run because the environment lacks niri, Quickshell, or input permissions, report that explicitly.

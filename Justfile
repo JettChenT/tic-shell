@@ -7,19 +7,11 @@ default:
 build:
     cargo build --workspace
 
-# Build the release sidebar daemon used by the QML sidebar.
-build-sidebar:
-    cargo build --release --package tic-sidebar-core
-
 # Check the Rust workspace.
 check:
     cargo check --workspace
 
-# Check only the Rust sidebar daemon.
-check-sidebar:
-    cargo check --package tic-sidebar-core
-
-# Run the Quickshell/QML sidebar. Builds tic-sidebar-core if needed.
+# Run the Quickshell/QML sidebar.
 sidebar:
     bin/tic-sidebar start
 

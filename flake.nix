@@ -1,10 +1,14 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    noctalia-qs = {
+      url = "github:noctalia-dev/noctalia-qs";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, noctalia-qs, ... }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -23,7 +27,9 @@
     in
     {
       devShells = forAllSystems (pkgs: {
-        default = pkgs.callPackage ./nix/shell.nix { };
+        default = pkgs.callPackage ./nix/shell.nix {
+          quickshell = noctalia-qs.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

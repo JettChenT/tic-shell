@@ -3,7 +3,7 @@
 `tic-shell` is a local Wayland/niri shell experiment. It currently contains:
 
 - a Quickshell/QML left sidebar for niri workspaces and an embedded Codex ACP chat pane
-- a Rust `tic-sidebar-core` daemon that streams niri workspace/window state to QML over JSON lines
+- native Quickshell/Niri bindings for workspace, active-window, and window-title state
 - a Bun-powered ACP client bridge used by the sidebar
 - a Rust `cua` CLI for niri-focused computer-use actions such as workspace description, screenshots, clicks, typing, and scrolling
 
@@ -16,7 +16,6 @@ bin/
   tic-sidebar          Quickshell launcher and IPC wrapper
   tic-codex-agent     Bun bridge between the sidebar and a Codex ACP adapter
 crates/
-  sidebar-core/       Rust JSONL daemon for niri workspace/window state and actions
   app/                legacy GPUI application entrypoint
   shell-sidebar/      legacy GPUI workspace rail and Codex rail
   services/           niri workspace/window state and actions
@@ -29,7 +28,7 @@ cua/
 shell/agent-sidebar/
   shell.qml           Quickshell sidebar entrypoint
   Modules/            workspace and Codex pane composition
-  Services/           Rust-core workspace process, annotation, and Codex process state
+  Services/           native Niri workspace state, annotation, and Codex process state
   Widgets/            reusable sidebar controls and cards
 tests/
   tic-codex-agent.test.mjs
@@ -44,13 +43,13 @@ docs/
 Runtime requirements depend on the component:
 
 - `bun` for `bin/tic-codex-agent` and its tests
-- `cargo`/Rust for `tic-sidebar-core` and the `cua` CLI
+- `cargo`/Rust for the legacy GPUI crates and the `cua` CLI
 - `qs` or `quickshell` for the QML sidebar
 - `niri` for compositor IPC
 - `codex-acp`, or `bunx` to run `@zed-industries/codex-acp`
 - `grim` and Linux `uinput` support for some `cua` screenshot/input actions
 
-The QML sidebar uses Quickshell's Wayland layer-shell support. Workspace/window state comes from `tic-sidebar-core` over JSON lines.
+The QML sidebar uses Quickshell's Wayland layer-shell support. Workspace/window state comes from Quickshell's native Niri service.
 
 ## Development Commands
 

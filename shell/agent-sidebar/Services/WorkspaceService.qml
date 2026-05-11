@@ -1,13 +1,11 @@
 import QtQuick
 import Quickshell
-import Quickshell.Io
+import Quickshell.Niri
 import Quickshell.Widgets
 
 Item {
   id: root
 
-  property string ticShellRoot: ""
-  property string coreBinary: Quickshell.env("TIC_SIDEBAR_CORE_BIN") || (ticShellRoot + "/target/release/tic-sidebar-core")
   property var workspaceRows: []
   property var windowRows: []
   property int windowRevision: 0
@@ -30,6 +28,13 @@ Item {
 
   function currentAgentWorkspaceKey() {
     return activeWorkspaceId === -1 ? "workspace:default" : workspaceKey(activeWorkspaceId);
+  }
+
+  function displayWorkspaceName(workspace) {
+    if (workspace.name && workspace.name.length > 0) {
+      return workspace.name;
+    }
+    return String(workspace.idx);
   }
 
   function windowsForWorkspace(workspaceId) {
@@ -92,31 +97,104 @@ Item {
     return "";
   }
 
-  function ensureRunning() {
-    if (!sidebarCore.running) {
-      sidebarCore.running = true;
+  function refreshState() {
+    const workspaces = Niri.workspaces.values.slice().sort((a, b) => {
+      if (a.output !== b.output) {
+        return a.output < b.output ? -1 : 1;
+      }
+      return a.idx - b.idx;
+    });
+    const windows = Niri.windows.values.map(win => ({
+      id: win.id,
+      key: windowKey(win.id),
+      title: win.title || "(untitled)",
+      appId: win.appId || "",
+      workspaceId: win.workspaceId || -1,
+      focused: win.focused,
+      floating: win.isFloating,
+      positionX: win.positionX,
+      positionY: win.positionY
+    })).sort((a, b) => {
+      if (a.workspaceId !== b.workspaceId) {
+        return a.workspaceId - b.workspaceId;
+      }
+      if (a.positionX !== b.positionX) {
+        return a.positionX - b.positionX;
+      }
+      if (a.positionY !== b.positionY) {
+        return a.positionY - b.positionY;
+      }
+      return a.id - b.id;
+    });
+    let nextActiveWorkspaceId = -1;
+
+    const rows = workspaces.map(ws => ({
+      id: ws.id,
+      key: workspaceKey(ws.id),
+      idx: ws.idx,
+      name: ws.name || "",
+      label: displayWorkspaceName(ws),
+      output: ws.output || "",
+      focused: ws.focused,
+      active: ws.active,
+      urgent: ws.urgent,
+      occupied: ws.occupied,
+      activeWindowId: ws.activeWindowId || 0
+    }));
+
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].focused || rows[i].active) {
+        nextActiveWorkspaceId = rows[i].id;
+        break;
+      }
     }
+
+    if (nextActiveWorkspaceId !== -1 && nextActiveWorkspaceId !== activeWorkspaceId) {
+      activeWorkspaceId = nextActiveWorkspaceId;
+      const activeRow = rows.find(row => row.id === nextActiveWorkspaceId);
+      activeWorkspaceLabel = activeRow ? activeRow.label : "Workspace";
+      agentWorkspaceChanged();
+    }
+
+    const nextRowsJson = JSON.stringify(workspaceRowsSignature(rows));
+    if (nextRowsJson !== lastWorkspaceRowsJson) {
+      lastWorkspaceRowsJson = nextRowsJson;
+      workspaceRows = rows;
+    }
+
+    const nextWindowStructureRows = windows.map(win => ({
+      id: win.id,
+      key: win.key,
+      appId: win.appId,
+      workspaceId: win.workspaceId,
+      floating: win.floating,
+      positionX: win.positionX,
+      positionY: win.positionY
+    }));
+    const nextWindowStructureRowsJson = JSON.stringify(nextWindowStructureRows);
+    if (nextWindowStructureRowsJson !== lastWindowStructureRowsJson) {
+      lastWindowStructureRowsJson = nextWindowStructureRowsJson;
+      windowStructureRows = nextWindowStructureRows;
+      windowStructureRevision++;
+    }
+
+    windowRows = windows;
+    windowRevision++;
   }
 
-  function writeCommand(command) {
-    ensureRunning();
-    sidebarCore.write(JSON.stringify(command) + "\n");
-  }
-
-  function focusBottomWorkspace() {
-    writeCommand({ type: "focus_workspace", idx: bottomWorkspaceIndex() });
-  }
-
-  function focusWorkspace(workspace) {
-    writeCommand({ type: "focus_workspace", idx: workspace.idx });
-  }
-
-  function focusWindow(windowRow) {
-    writeCommand({ type: "focus_window", id: windowRow.id });
-  }
-
-  function recenterColumns() {
-    writeCommand({ type: "recenter_columns" });
+  function workspaceRowsSignature(rows) {
+    return rows.map(row => ({
+      id: row.id,
+      idx: row.idx,
+      name: row.name,
+      label: row.label,
+      output: row.output,
+      focused: row.focused,
+      active: row.active,
+      urgent: row.urgent,
+      occupied: row.occupied,
+      activeWindowId: row.activeWindowId
+    }));
   }
 
   function bottomWorkspaceIndex() {
@@ -137,168 +215,42 @@ Item {
     return maxIdx;
   }
 
-  function handleLine(line) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      return;
-    }
-
-    try {
-      applyMessage(JSON.parse(trimmed));
-    } catch (error) {
-      console.warn("invalid sidebar core message", error, trimmed);
-    }
+  function focusBottomWorkspace() {
+    Niri.dispatch(["focus-workspace", String(bottomWorkspaceIndex())]);
   }
 
-  function applyMessage(message) {
-    if (message.type === "snapshot") {
-      applySnapshot(message);
-    } else if (message.type === "window_changed") {
-      applyWindowChanged(message.window);
-    } else if (message.type === "window_closed") {
-      applyWindowClosed(message.id);
-    } else if (message.type === "window_focus_changed") {
-      applyWindowFocusChanged(message.id);
-    } else if (message.type === "error") {
-      console.warn("sidebar core error", message.message || "");
-    }
+  function focusWorkspace(workspace) {
+    Niri.dispatch(["focus-workspace", String(workspace.idx)]);
   }
 
-  function applySnapshot(snapshot) {
-    const rows = snapshot.workspaces || [];
-    const windows = sortWindows(snapshot.windows || []);
-    const nextActiveWorkspaceId = snapshot.activeWorkspaceId === undefined ? -1 : snapshot.activeWorkspaceId;
-
-    if (nextActiveWorkspaceId !== activeWorkspaceId) {
-      activeWorkspaceId = nextActiveWorkspaceId;
-      activeWorkspaceLabel = snapshot.activeWorkspaceLabel || "Workspace";
-      agentWorkspaceChanged();
-    }
-
-    const nextRowsJson = JSON.stringify(workspaceRowsSignature(rows));
-    if (nextRowsJson !== lastWorkspaceRowsJson) {
-      lastWorkspaceRowsJson = nextRowsJson;
-      workspaceRows = rows;
-    }
-
-    setWindows(windows);
+  function focusWindow(windowRow) {
+    Niri.dispatch(["focus-window", "--id", String(windowRow.id)]);
   }
 
-  function applyWindowChanged(windowRow) {
-    if (!windowRow) {
-      return;
-    }
-
-    const next = windowRows.slice();
-    let replaced = false;
-    for (let i = 0; i < next.length; i++) {
-      if (next[i].id === windowRow.id) {
-        next[i] = windowRow;
-        replaced = true;
-        break;
-      }
-    }
-    if (!replaced) {
-      next.push(windowRow);
-    }
-    setWindows(sortWindows(next));
+  function recenterColumns() {
+    Niri.dispatch(["expand-column-to-available-width"]);
   }
 
-  function applyWindowClosed(windowId) {
-    setWindows(windowRows.filter(win => win.id !== windowId));
+  Component.onCompleted: {
+    Niri.refreshOutputs();
+    Niri.refreshWorkspaces();
+    Niri.refreshWindows();
+    Qt.callLater(refreshState);
   }
 
-  function applyWindowFocusChanged(windowId) {
-    const next = windowRows.map(win => Object.assign({}, win, { focused: win.id === windowId }));
-    setWindows(next);
-  }
+  Connections {
+    target: Niri
 
-  function setWindows(windows) {
-    const nextWindowStructureRows = windows.map(win => ({
-      id: win.id,
-      key: win.key || windowKey(win.id),
-      appId: win.appId || "",
-      workspaceId: win.workspaceId === undefined ? -1 : win.workspaceId,
-      floating: !!win.floating,
-      positionX: win.positionX || 0,
-      positionY: win.positionY || 0
-    }));
-    const nextWindowStructureRowsJson = JSON.stringify(nextWindowStructureRows);
-    if (nextWindowStructureRowsJson !== lastWindowStructureRowsJson) {
-      lastWindowStructureRowsJson = nextWindowStructureRowsJson;
-      windowStructureRows = nextWindowStructureRows;
-      windowStructureRevision++;
+    function onWorkspacesUpdated() {
+      refreshState();
     }
 
-    windowRows = windows;
-    windowRevision++;
-  }
-
-  function sortWindows(windows) {
-    return windows.slice().sort((a, b) => {
-      const aw = a.workspaceId === undefined ? -1 : a.workspaceId;
-      const bw = b.workspaceId === undefined ? -1 : b.workspaceId;
-      if (aw !== bw) {
-        return aw - bw;
-      }
-      if ((a.positionX || 0) !== (b.positionX || 0)) {
-        return (a.positionX || 0) - (b.positionX || 0);
-      }
-      if ((a.positionY || 0) !== (b.positionY || 0)) {
-        return (a.positionY || 0) - (b.positionY || 0);
-      }
-      return a.id - b.id;
-    });
-  }
-
-  function workspaceRowsSignature(rows) {
-    return rows.map(row => ({
-      id: row.id,
-      idx: row.idx,
-      name: row.name,
-      label: row.label,
-      output: row.output,
-      focused: row.focused,
-      active: row.active,
-      urgent: row.urgent,
-      occupied: row.occupied,
-      activeWindowId: row.activeWindowId
-    }));
-  }
-
-  Component.onCompleted: ensureRunning()
-
-  Process {
-    id: sidebarCore
-
-    command: [root.coreBinary]
-    stdinEnabled: true
-    running: false
-
-    stdout: SplitParser {
-      onRead: data => root.handleLine(data)
+    function onWindowsUpdated() {
+      refreshState();
     }
 
-    stderr: SplitParser {
-      onRead: data => {
-        const trimmed = data.trim();
-        if (trimmed.length > 0) {
-          console.warn("sidebar core", trimmed);
-        }
-      }
+    function onFocusedWindowChanged() {
+      refreshState();
     }
-
-    onExited: (exitCode, exitStatus) => {
-      console.warn("sidebar core stopped", exitCode, exitStatus);
-      restartTimer.restart();
-    }
-  }
-
-  Timer {
-    id: restartTimer
-
-    interval: 500
-    repeat: false
-    onTriggered: root.ensureRunning()
   }
 }

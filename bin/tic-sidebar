@@ -5,15 +5,16 @@ action="${1:-toggle}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 config_path="$repo_root/shell/agent-sidebar"
-core_bin="${TIC_SIDEBAR_CORE_BIN:-$repo_root/target/release/tic-sidebar-core}"
 
 export TIC_SHELL_ROOT="${TIC_SHELL_ROOT:-$repo_root}"
-export TIC_SIDEBAR_CORE_BIN="$core_bin"
 
 find_quickshell() {
   if [[ -n "${TIC_QUICKSHELL_BIN:-}" ]]; then
     printf '%s\n' "$TIC_QUICKSHELL_BIN"
     return
+  fi
+  if [[ -z "${IN_NIX_SHELL:-}" && -z "${TIC_SIDEBAR_NIX_FALLBACK:-}" ]] && command -v nix >/dev/null 2>&1 && [[ -f "$repo_root/flake.nix" ]]; then
+    exec env TIC_SIDEBAR_NIX_FALLBACK=1 nix develop "$repo_root" -c "$0" "$action"
   fi
   if command -v qs >/dev/null 2>&1; then
     command -v qs
@@ -30,18 +31,10 @@ find_quickshell() {
   exit 127
 }
 
-ensure_core() {
-  if [[ -x "$core_bin" ]]; then
-    return
-  fi
-  cargo build --release --manifest-path "$repo_root/Cargo.toml" --package tic-sidebar-core
-}
-
 qscmd="$(find_quickshell)"
 
 case "$action" in
   start)
-    ensure_core
     exec "$qscmd" -p "$config_path"
     ;;
   stop)

@@ -5454,19 +5454,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tic-sidebar-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "services",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "tic-ui"
 version = "0.1.0"
 dependencies = [
