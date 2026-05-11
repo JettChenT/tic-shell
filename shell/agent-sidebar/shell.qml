@@ -25,7 +25,7 @@ ShellRoot {
   property int activeWorkspaceId: -1
   property string activeWorkspaceLabel: "Workspace"
   property bool sidebarCollapsed: false
-  property bool agentPaneCollapsed: false
+  property bool agentPaneCollapsed: true
   property bool stateReady: false
   property string agentStatus: "starting"
   property var agentCommands: []
