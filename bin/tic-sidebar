@@ -36,6 +36,10 @@ find_quickshell() {
 qscmd="$(find_quickshell)"
 
 case "$action" in
+  ipc)
+    shift
+    exec "$qscmd" ipc -p "$config_path" "$@"
+    ;;
   start)
     exec "$qscmd" -p "$config_path"
     ;;
@@ -61,7 +65,7 @@ case "$action" in
     exec "$qscmd" ipc -p "$config_path" call sidebar hideAgent
     ;;
   *)
-    echo "usage: tic-sidebar [start|stop|toggle|show|hide|toggle-agent|show-agent|hide-agent]" >&2
+    echo "usage: tic-sidebar [start|stop|toggle|show|hide|toggle-agent|show-agent|hide-agent|ipc ...]" >&2
     exit 64
     ;;
 esac
