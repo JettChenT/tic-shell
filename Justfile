@@ -11,14 +11,14 @@ build:
 check:
     cargo check --workspace
 
-# Run the Quickshell/QML sidebar.
+# Run the integrated Noctalia left bar with the tic workspace rail.
 sidebar:
     bin/tic-sidebar start
 
 # Alias for `just sidebar`.
 run-sidebar: sidebar
 
-# Stop the running Quickshell/QML sidebar.
+# Stop the integrated Noctalia/tic sidebar.
 stop-sidebar:
     bin/tic-sidebar stop
 

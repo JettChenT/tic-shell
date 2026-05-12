@@ -29,7 +29,7 @@ Item {
         Text {
           width: parent.width - newSessionButton.width - clearSessionButton.width - cancelSessionButton.width - parent.spacing * 3
           height: parent.height
-          color: "#cad3f5"
+          color: root.shell.mOnSurface
           font.pixelSize: 17
           font.weight: Font.DemiBold
           verticalAlignment: Text.AlignVCenter
@@ -44,6 +44,10 @@ Item {
           height: 28
           label: "+"
           labelSize: 18
+          labelColor: root.shell.mPrimary
+          backgroundColor: root.shell.capsuleColor
+          hoverColor: root.shell.capsuleHoverColor
+          borderColor: root.shell.mOutline
           onClicked: root.shell.sendAgentControl("new")
         }
 
@@ -53,9 +57,12 @@ Item {
           width: 28
           height: 28
           label: "C"
-          labelColor: "#cad3f5"
+          labelColor: root.shell.mOnSurface
           labelSize: 13
           labelWeight: Font.DemiBold
+          backgroundColor: root.shell.capsuleColor
+          hoverColor: root.shell.capsuleHoverColor
+          borderColor: root.shell.mOutline
           onClicked: root.shell.sendAgentControl("clear")
         }
 
@@ -65,9 +72,12 @@ Item {
           width: 28
           height: 28
           label: "x"
-          labelColor: "#ed8796"
+          labelColor: root.shell.mError
           labelSize: 15
           labelWeight: Font.DemiBold
+          backgroundColor: root.shell.capsuleColor
+          hoverColor: root.shell.capsuleHoverColor
+          borderColor: root.shell.mOutline
           onClicked: root.shell.sendAgentControl("cancel")
         }
       }
@@ -76,7 +86,7 @@ Item {
         visible: root.shell.agentStatus === "error" || root.shell.agentStatus === "stopped"
         width: parent.width
         height: 16
-        color: "#ed8796"
+        color: root.shell.mError
         font.pixelSize: 12
         text: visible ? root.shell.agentStatus : ""
         elide: Text.ElideRight
@@ -102,6 +112,7 @@ Item {
           model: root.shell.agentEvents
 
           Widgets.AgentEventBubble {
+            shell: root.shell
             event: modelData
           }
         }

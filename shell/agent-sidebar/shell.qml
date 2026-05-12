@@ -18,6 +18,22 @@ ShellRoot {
   readonly property string ticShellRoot: Quickshell.env("TIC_SHELL_ROOT") || (Quickshell.env("HOME") + "/dev/tic-shell")
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/lnx"
   readonly property string stateFile: stateDir + "/workspaces.json"
+  readonly property color mPrimary: noctaliaTheme.mPrimary
+  readonly property color mOnPrimary: noctaliaTheme.mOnPrimary
+  readonly property color mSecondary: noctaliaTheme.mSecondary
+  readonly property color mTertiary: noctaliaTheme.mTertiary
+  readonly property color mError: noctaliaTheme.mError
+  readonly property color mOnError: noctaliaTheme.mOnError
+  readonly property color mSurface: noctaliaTheme.mSurface
+  readonly property color mOnSurface: noctaliaTheme.mOnSurface
+  readonly property color mSurfaceVariant: noctaliaTheme.mSurfaceVariant
+  readonly property color mOnSurfaceVariant: noctaliaTheme.mOnSurfaceVariant
+  readonly property color mOutline: noctaliaTheme.mOutline
+  readonly property color mHover: noctaliaTheme.mHover
+  readonly property color mOnHover: noctaliaTheme.mOnHover
+  readonly property color barBackground: Qt.alpha(mSurface, 0.93)
+  readonly property color capsuleColor: mSurfaceVariant
+  readonly property color capsuleHoverColor: Qt.alpha(mHover, 0.25)
 
   readonly property var annotations: annotationStore.annotations
   readonly property var agentEvents: agentBridge.events
@@ -149,6 +165,14 @@ ShellRoot {
     workspaceService.focusWindow(windowRow);
   }
 
+  function showWindowPreview(windowRow, x, y, rowHeight) {
+    workspaceService.showWindowPreview(windowRow, x, y, rowHeight);
+  }
+
+  function hideWindowPreview() {
+    workspaceService.hideWindowPreview();
+  }
+
   function showSidebar() {
     sidebarCollapsed = false;
     scheduleRecenter();
@@ -212,6 +236,10 @@ ShellRoot {
     onWorkspaceMessage: title => shell.activeWorkspaceLabel = title
   }
 
+  Services.NoctaliaTheme {
+    id: noctaliaTheme
+  }
+
   Timer {
     id: recenterTimer
 
@@ -251,7 +279,7 @@ ShellRoot {
   PanelWindow {
     id: panel
 
-    color: "#20242c"
+    color: shell.barBackground
     implicitWidth: shell.railWidth
 
     WlrLayershell.layer: WlrLayer.Top
@@ -268,8 +296,8 @@ ShellRoot {
 
     Rectangle {
       anchors.fill: parent
-      color: "#20242c"
-      border.color: "#8bd5ca"
+      color: shell.barBackground
+      border.color: shell.mOutline
       border.width: 1
 
       Row {
@@ -284,7 +312,7 @@ ShellRoot {
           visible: !shell.sidebarCollapsed && !shell.agentPaneCollapsed
           width: shell.paneDividerWidth
           height: parent.height
-          color: "#3a4050"
+          color: shell.mOutline
         }
 
         Modules.AgentPane {

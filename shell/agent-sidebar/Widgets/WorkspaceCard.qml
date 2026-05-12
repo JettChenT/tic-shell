@@ -15,13 +15,15 @@ Rectangle {
   signal selected(var workspace)
   signal annotationAccepted(int workspaceId, string annotation)
   signal windowSelected(var windowRow)
+  signal windowPreviewRequested(var windowRow, real x, real y, real height)
+  signal windowPreviewHidden()
 
   width: parent ? parent.width : 0
   height: 58 + (workspaceWindows.length > 0 ? windowListHeight + 8 : emptyWorkspaceLabel.height + 7)
-  radius: 7
-  color: current ? "#334044" : (cardHover.hovered ? "#2d3340" : "#252a34")
-  border.color: workspace.urgent ? "#ed8796" : (current ? "#8bd5ca" : "#3a4050")
-  border.width: current ? 2 : 1
+  radius: 16
+  color: cardHover.hovered ? root.shell.capsuleHoverColor : root.shell.capsuleColor
+  border.color: workspace.urgent ? root.shell.mError : (current ? root.shell.mPrimary : root.shell.mOutline)
+  border.width: 1
 
   HoverHandler {
     id: cardHover
@@ -39,7 +41,7 @@ Rectangle {
 
   Column {
     anchors.fill: parent
-    anchors.margins: 10
+    anchors.margins: 9
     spacing: 7
 
     Row {
@@ -50,12 +52,12 @@ Rectangle {
       Rectangle {
         width: 30
         height: 24
-        radius: 6
-        color: root.current ? "#8bd5ca" : "#3b4252"
+        radius: 12
+        color: root.current ? root.shell.mPrimary : Qt.alpha(root.shell.mOnSurfaceVariant, 0.18)
 
         Text {
           anchors.centerIn: parent
-          color: root.current ? "#181c22" : "#cad3f5"
+          color: root.current ? root.shell.mOnPrimary : root.shell.mOnSurface
           font.pixelSize: 13
           font.weight: Font.DemiBold
           text: root.workspace.label
@@ -67,9 +69,9 @@ Rectangle {
 
         width: parent.width - 38
         height: 25
-        color: activeFocus ? "#ffffff" : (text.length > 0 ? "#cad3f5" : "#7f8797")
-        selectedTextColor: "#181c22"
-        selectionColor: "#8bd5ca"
+        color: activeFocus ? root.shell.mOnSurface : (text.length > 0 ? root.shell.mOnSurface : root.shell.mOnSurfaceVariant)
+        selectedTextColor: root.shell.mOnPrimary
+        selectionColor: root.shell.mPrimary
         font.pixelSize: 14
         font.weight: text.length > 0 ? Font.DemiBold : Font.Normal
         verticalAlignment: TextInput.AlignVCenter
@@ -95,7 +97,7 @@ Rectangle {
         Text {
           anchors.fill: parent
           visible: annotationInput.text.length === 0 && !annotationInput.activeFocus
-          color: "#697284"
+          color: root.shell.mOnSurfaceVariant
           font.pixelSize: 14
           verticalAlignment: Text.AlignVCenter
           text: "name workspace"
@@ -110,7 +112,7 @@ Rectangle {
       width: parent.width
       height: 20
       visible: root.workspaceWindows.length === 0
-      color: "#7f8797"
+      color: root.shell.mOnSurfaceVariant
       font.pixelSize: 12
       verticalAlignment: Text.AlignVCenter
       text: "empty"
@@ -131,6 +133,8 @@ Rectangle {
           shell: root.shell
           windowRow: modelData
           onSelected: windowRow => root.windowSelected(windowRow)
+          onPreviewRequested: (windowRow, x, y, height) => root.windowPreviewRequested(windowRow, x, y, height)
+          onPreviewHidden: root.windowPreviewHidden()
         }
       }
     }

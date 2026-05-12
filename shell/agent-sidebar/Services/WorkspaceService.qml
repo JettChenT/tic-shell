@@ -227,8 +227,39 @@ Item {
     Niri.dispatch(["focus-window", "--id", String(windowRow.id)]);
   }
 
+  function showWindowPreview(windowRow, x, y, rowHeight) {
+    const previewWidth = 360;
+    const previewHeight = 220;
+    const previewX = Math.max(0, Math.round(x));
+    const previewY = Math.max(0, Math.round(y - previewHeight / 2));
+
+    Niri.dispatch([
+      "show-window-preview",
+      "--id", String(windowRow.id),
+      "--x", String(previewX),
+      "--y", String(previewY),
+      "--width", String(previewWidth),
+      "--height", String(previewHeight)
+    ]);
+  }
+
+  function hideWindowPreview() {
+    Niri.dispatch(["hide-window-preview"]);
+  }
+
   function recenterColumns() {
-    Niri.dispatch(["expand-column-to-available-width"]);
+    let focusedWindowId = -1;
+    for (let i = 0; i < windowRows.length; i++) {
+      if (windowRows[i].focused) {
+        focusedWindowId = windowRows[i].id;
+        break;
+      }
+    }
+
+    Niri.dispatch(["focus-column-first"]);
+    if (focusedWindowId !== -1) {
+      Niri.dispatch(["focus-window", "--id", String(focusedWindowId)]);
+    }
   }
 
   Component.onCompleted: {

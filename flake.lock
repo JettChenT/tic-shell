@@ -41,7 +41,29 @@
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "noctalia-qs": "noctalia-qs"
+        "noctalia-qs": "noctalia-qs",
+        "tiri": "tiri"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "tiri",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1757989933,
+        "narHash": "sha256-9cpKYWWPCFhgwQTww8S94rTXgg8Q8ydFv9fXM6I8xQM=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "8249aa3442fb9b45e615a35f39eca2fe5510d7c3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "type": "github"
       }
     },
     "systems": {
@@ -57,6 +79,28 @@
         "owner": "nix-systems",
         "repo": "default-linux",
         "type": "github"
+      }
+    },
+    "tiri": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "rust-overlay": "rust-overlay"
+      },
+      "locked": {
+        "lastModified": 1778574078,
+        "narHash": "sha256-BQF24sEhuFMSFdHQaUs8Hv5ZzAfI2zkbcsO0SxlXRGM=",
+        "ref": "main",
+        "rev": "f0697eab39710333896f380a3bd11b12844afdcd",
+        "revCount": 2792,
+        "type": "git",
+        "url": "https://github.com/JettChenT/tiri.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/JettChenT/tiri.git"
       }
     },
     "treefmt-nix": {

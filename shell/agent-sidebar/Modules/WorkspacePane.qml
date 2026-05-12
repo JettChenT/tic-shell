@@ -12,10 +12,12 @@ Item {
 
   Column {
     anchors.fill: parent
-    anchors.margins: root.shell.sidebarCollapsed ? 6 : 12
-    spacing: 10
+    anchors.margins: root.shell.sidebarCollapsed ? 5 : 8
+    spacing: 6
 
     Row {
+      id: headerRow
+
       width: parent.width
       height: 32
       spacing: root.shell.sidebarCollapsed ? 0 : 8
@@ -26,12 +28,16 @@ Item {
         label: root.shell.sidebarCollapsed ? ">" : "<"
         labelSize: 18
         labelWeight: Font.DemiBold
+        labelColor: root.shell.mPrimary
+        backgroundColor: root.shell.capsuleColor
+        hoverColor: root.shell.capsuleHoverColor
+        borderColor: root.shell.mOutline
         onClicked: root.shell.toggleSidebar()
       }
 
       Item {
         visible: !root.shell.sidebarCollapsed
-        width: parent.width - collapseSidebarButton.width - toggleAgentPaneButton.width - parent.spacing
+        width: Math.max(0, parent.width - collapseSidebarButton.width - toggleAgentPaneButton.width - parent.spacing * 2)
         height: parent.height
       }
 
@@ -42,8 +48,10 @@ Item {
         label: "C"
         labelSize: 13
         labelWeight: Font.DemiBold
-        labelColor: root.shell.agentPaneCollapsed ? "#7f8797" : "#8bd5ca"
-        borderColor: root.shell.agentPaneCollapsed ? "#596173" : "#8bd5ca"
+        labelColor: root.shell.agentPaneCollapsed ? root.shell.mOnSurfaceVariant : root.shell.mPrimary
+        backgroundColor: root.shell.capsuleColor
+        hoverColor: root.shell.capsuleHoverColor
+        borderColor: root.shell.agentPaneCollapsed ? root.shell.mOutline : root.shell.mPrimary
         onClicked: root.shell.toggleAgentPane()
       }
     }
@@ -53,7 +61,7 @@ Item {
 
       visible: !root.shell.sidebarCollapsed
       width: parent.width
-      height: parent.height - y
+      height: Math.max(0, parent.height - headerRow.height - 8)
       clip: true
       contentWidth: width
       contentHeight: workspaceColumn.height
@@ -73,6 +81,8 @@ Item {
             onSelected: workspace => root.shell.focusWorkspace(workspace)
             onAnnotationAccepted: (workspaceId, annotation) => root.shell.setAnnotation(workspaceId, annotation)
             onWindowSelected: windowRow => root.shell.focusWindow(windowRow)
+            onWindowPreviewRequested: (windowRow, x, y, height) => root.shell.showWindowPreview(windowRow, x, y, height)
+            onWindowPreviewHidden: root.shell.hideWindowPreview()
           }
         }
       }
