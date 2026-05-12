@@ -15,9 +15,6 @@ find_quickshell() {
     printf '%s\n' "$TIC_QUICKSHELL_BIN"
     return
   fi
-  if [[ -z "${IN_NIX_SHELL:-}" && -z "${TIC_SIDEBAR_NIX_FALLBACK:-}" ]] && command -v nix >/dev/null 2>&1 && [[ -f "$repo_root/flake.nix" ]]; then
-    exec env TIC_SIDEBAR_NIX_FALLBACK=1 nix develop "$repo_root" -c "$0" "$action"
-  fi
   if command -v qs >/dev/null 2>&1; then
     command -v qs
     return
