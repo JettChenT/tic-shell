@@ -14,7 +14,7 @@ PanelWindow {
   WlrLayershell.namespace: "tic-workspace-" + (screen?.name || "unknown")
   WlrLayershell.layer: WlrLayer.Top
   WlrLayershell.exclusionMode: ExclusionMode.Ignore
-  WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+  WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
   readonly property string barPosition: Settings.getBarPositionForScreen(screen?.name)
   readonly property bool barIsVertical: barPosition === "left" || barPosition === "right"
