@@ -17,10 +17,18 @@ async fn main() -> Result<()> {
     }
 
     let repo_root = repo_root();
-    let workdir = std::env::var_os("TIC_CODEX_WORKDIR")
-        .or_else(|| std::env::var_os("HOME"))
+    let workdir = std::env::var_os("TIC_CODEX_WORKDIR_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.clone());
+        .or_else(|| {
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .map(|dir| dir.join("tic-shell").join("codex-workspaces"))
+        })
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("tic-shell")
+                .join("codex-workspaces")
+        });
 
     let annotations = persistence::AnnotationStore::load_default()
         .context("failed to load workspace annotations")?;

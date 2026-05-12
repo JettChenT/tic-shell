@@ -2,13 +2,19 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { pathToFileURL } from "node:url";
 
 process.env.TIC_CODEX_AGENT_TEST = "1";
 
 const moduleUrl = pathToFileURL(path.resolve("bin/tic-codex-agent")).href;
 const { createClient } = await import(moduleUrl);
+const testRoot = await mkdtemp(path.join(os.tmpdir(), "tic-codex-agent-tests-"));
+let nextClientRoot = 1;
+
+after(async () => {
+  await rm(testRoot, { recursive: true, force: true });
+});
 
 function makeClient(options = {}) {
   const messages = [];
@@ -21,6 +27,7 @@ function makeClient(options = {}) {
   const client = createClient({
     child: fake,
     emitMessage: message => messages.push(message),
+    workspaceRoot: path.join(testRoot, `client-${nextClientRoot++}`),
     ...options,
   });
   return { client, messages, writes: fake.writes };
@@ -184,9 +191,11 @@ test("filesystem handlers stay inside workspace root", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "tic-acp-"));
   try {
     const { client, writes } = makeClient({ workspaceRoot: root });
+    client.prepareWorkspaceRoot(client.workspaces.get("workspace:default"));
     await client.handleWriteTextFile({ path: "nested/file.txt", content: "a\nb\nc\n" });
 
-    assert.equal(await readFile(path.join(root, "nested/file.txt"), "utf8"), "a\nb\nc\n");
+    const workspaceRoot = path.join(root, "workspace-default");
+    assert.equal(await readFile(path.join(workspaceRoot, "nested/file.txt"), "utf8"), "a\nb\nc\n");
     assert.deepEqual(await client.handleReadTextFile({ path: "nested/file.txt", line: 2, limit: 1 }), { content: "b\n" });
     assert.throws(() => client.resolveWorkspacePath("../outside.txt"), /outside TIC_CODEX_WORKDIR/);
 
@@ -204,6 +213,42 @@ test("filesystem handlers stay inside workspace root", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("workspace setup creates per-workspace AGENTS instructions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tic-workspaces-"));
+  try {
+    const { client } = makeClient({ workspaceRoot: root });
+
+    client.setActiveWorkspace("niri:workspace:2", "2");
+    const state = client.workspaces.get("niri:workspace:2");
+    const workspaceRoot = client.prepareWorkspaceRoot(state);
+    const agentsMd = await readFile(path.join(workspaceRoot, "AGENTS.md"), "utf8");
+
+    assert.equal(workspaceRoot, path.join(root, "workspace-2"));
+    assert.match(agentsMd, /Workspace number\/id: 2/);
+    assert.match(agentsMd, /cua describe-workspace 2/);
+    assert.match(agentsMd, /expected to already be available in `PATH`/);
+    assert.match(agentsMd, /composite_screenshot/);
+    assert.match(agentsMd, /image-viewing tool/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace sessions use distinct ad-hoc folders as cwd", () => {
+  const root = path.join(testRoot, "session-cwds");
+  const { client, writes } = makeClient({ workspaceRoot: root });
+
+  client.initialize();
+  respondTo(writes, client, "initialize", {});
+  assert.equal(writes.findLast(write => write.method === "session/new").params.cwd, path.join(root, "workspace-default"));
+
+  client.setActiveWorkspace("niri:workspace:1", "1");
+  assert.equal(writes.findLast(write => write.method === "session/new").params.cwd, path.join(root, "workspace-1"));
+
+  client.setActiveWorkspace("niri:workspace:2", "2");
+  assert.equal(writes.findLast(write => write.method === "session/new").params.cwd, path.join(root, "workspace-2"));
 });
 
 test("workspaces get independent ACP sessions and transcripts", () => {

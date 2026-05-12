@@ -113,8 +113,8 @@ Item {
     running: false
     environment: ({
       "HOME": Quickshell.env("HOME") || "/home/jettc",
-      "PATH": "/run/current-system/sw/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.local/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.bun/bin:" + (Quickshell.env("PATH") || ""),
-      "TIC_CODEX_WORKDIR": Quickshell.env("HOME") || "/home/jettc"
+      "PATH": "/run/current-system/sw/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.local/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.cargo/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.bun/bin:" + (Quickshell.env("PATH") || ""),
+      "TIC_CODEX_WORKDIR_ROOT": (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/tic-shell/codex-workspaces"
     })
 
     stdout: SplitParser {

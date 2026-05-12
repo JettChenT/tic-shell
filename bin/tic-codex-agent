@@ -1,17 +1,22 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 
-const cwd = path.resolve(process.env.TIC_CODEX_WORKDIR || process.env.HOME || "/home/jettc");
+const runtimeDir = process.env.XDG_RUNTIME_DIR || os.tmpdir();
+const defaultWorkspaceRoot = path.resolve(
+  process.env.TIC_CODEX_WORKDIR_ROOT || path.join(runtimeDir, "tic-shell", "codex-workspaces")
+);
 const adapterCommand = process.env.TIC_CODEX_ACP_COMMAND || "";
 
 function emit(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function createClient({ child, emitMessage = emit, workspaceRoot = cwd }) {
+function createClient({ child, emitMessage = emit, workspaceRoot = defaultWorkspaceRoot }) {
 let nextId = 1;
 let nextEntryId = 1;
 let initialized = false;
@@ -29,9 +34,12 @@ const localCommands = [
 ];
 
 function createWorkspace(key = activeWorkspaceKey, title = activeWorkspaceTitle) {
+  const workspaceId = workspaceIdFromKey(key);
   return {
     key,
     title,
+    workspaceId,
+    root: workspaceRootFor(key, title),
     sessionId: "",
     sessionReady: false,
     sessionStarting: false,
@@ -50,6 +58,35 @@ function workspace(key = activeWorkspaceKey) {
     workspaces.set(key, createWorkspace(key, key));
   }
   return workspaces.get(key);
+}
+
+function workspaceIdFromKey(key) {
+  const match = String(key || "").match(/(?:^|:)workspace:(\d+)$/);
+  return match ? match[1] : "";
+}
+
+function safeWorkspaceName(key, title = key) {
+  const id = workspaceIdFromKey(key);
+  if (id) {
+    return `workspace-${id}`;
+  }
+  const raw = String(title || key || "default")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return raw || "workspace-default";
+}
+
+function workspaceRootFor(key, title = key) {
+  return path.join(path.resolve(workspaceRoot), safeWorkspaceName(key, title));
+}
+
+function updateWorkspaceMetadata(state, key = state.key, title = state.title) {
+  state.key = String(key || "workspace:default");
+  state.title = title || state.title || state.key;
+  state.workspaceId = workspaceIdFromKey(state.key);
+  state.root = workspaceRootFor(state.key, state.title);
 }
 
 function workspaceForSession(sessionId) {
@@ -181,12 +218,12 @@ function supportedClientCapabilities() {
   };
 }
 
-function resolveWorkspacePath(requestPath) {
+function resolveWorkspacePath(requestPath, state = workspace()) {
   if (typeof requestPath !== "string" || requestPath.trim().length === 0) {
     throw acpError(-32602, "Missing file path");
   }
 
-  const root = path.resolve(workspaceRoot);
+  const root = path.resolve(state.root);
   const absolute = path.resolve(root, requestPath);
   const relative = path.relative(root, absolute);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -206,14 +243,14 @@ function applyLineLimit(content, line, limit) {
   return lines.slice(start, maxLines === undefined ? undefined : start + maxLines).join("");
 }
 
-async function handleReadTextFile(params) {
-  const filePath = resolveWorkspacePath(params?.path);
+async function handleReadTextFile(params, state = workspace()) {
+  const filePath = resolveWorkspacePath(params?.path, state);
   const content = await readFile(filePath, "utf8");
   return { content: applyLineLimit(content, params?.line, params?.limit) };
 }
 
-async function handleWriteTextFile(params) {
-  const filePath = resolveWorkspacePath(params?.path);
+async function handleWriteTextFile(params, state = workspace()) {
+  const filePath = resolveWorkspacePath(params?.path, state);
   const content = params?.content;
   if (typeof content !== "string") {
     throw acpError(-32602, "Missing file content");
@@ -284,7 +321,7 @@ function commandList(state = workspace()) {
 function setActiveWorkspace(key, title = key) {
   const nextKey = String(key || "workspace:default");
   const state = workspace(nextKey);
-  state.title = title || state.title || nextKey;
+  updateWorkspaceMetadata(state, nextKey, title || state.title || nextKey);
   activeWorkspaceKey = nextKey;
   activeWorkspaceTitle = state.title;
   snapshot(state);
@@ -347,6 +384,18 @@ function newSession(state = workspace()) {
   }
 
   state.sessionStarting = true;
+  let cwd;
+  try {
+    cwd = prepareWorkspaceRoot(state);
+  } catch (err) {
+    state.sessionStarting = false;
+    if (state.key === activeWorkspaceKey) {
+      status("error");
+    }
+    appendEntry(state, "error", "Workspace setup failed", err?.message || String(err));
+    return;
+  }
+
   send("session/new", {
     cwd,
     mcpServers: [],
@@ -368,6 +417,42 @@ function newSession(state = workspace()) {
     selectMostPermissiveMode(state, result?.modes);
     flushPrompts(state);
   }, state);
+}
+
+function prepareWorkspaceRoot(state) {
+  updateWorkspaceMetadata(state);
+  mkdirSync(state.root, { recursive: true });
+  const instructions = agentInstructions(state);
+  writeFileSync(path.join(state.root, "AGENTS.md"), instructions, "utf8");
+  return state.root;
+}
+
+function agentInstructions(state) {
+  const workspaceLabel = state.workspaceId || state.title || state.key;
+  const workspaceReference = state.workspaceId || "(current focused workspace)";
+  const describeCommand = state.workspaceId ? `cua describe-workspace ${state.workspaceId}` : "cua describe-workspace";
+  return `# Codex Workspace ${workspaceLabel}
+
+You are running from a generated tic-shell ad-hoc workspace folder.
+
+Current niri workspace:
+- Key: ${state.key}
+- Title: ${state.title}
+- Workspace number/id: ${workspaceReference}
+
+Use the \`cua\` CLI for computer-use actions. It is expected to already be available in \`PATH\`.
+
+Useful commands:
+- \`${describeCommand}\` inspects this workspace and captures window screenshots.
+- \`cua screenshot-window <window-id>\` captures a single window.
+- \`cua click <window-id> <x> <y>\` clicks inside a window at window-relative coordinates.
+- \`cua type-text <window-id> "text"\` types into a focused window.
+- \`cua scroll <window-id> <up|down|left|right> <amount> [x] [y]\` scrolls in a window.
+
+When describing or acting on a workspace, run \`${describeCommand}\` first. Inspect the returned \`composite_screenshot\` image path with the available image-viewing tool before reasoning from metadata alone, then inspect individual window screenshots if the composite is not enough.
+
+The real tic-shell checkout is intentionally not your working directory. Use this folder for notes and temporary files, and use \`cua\` to inspect or act on the live desktop.
+`;
 }
 
 function selectMostPermissiveMode(state, modes) {
@@ -435,7 +520,7 @@ function handleSlashCommand(state, text) {
 
 function queuePrompt(text, key = activeWorkspaceKey, title = activeWorkspaceTitle) {
   const state = workspace(key);
-  state.title = title || state.title;
+  updateWorkspaceMetadata(state, key, title || state.title);
   activeWorkspaceKey = state.key;
   activeWorkspaceTitle = state.title;
   const trimmed = String(text || "").trim();
@@ -658,18 +743,19 @@ function allowPermissionRequest(message) {
 
 async function handleClientRequest(message) {
   try {
+    const state = clientRequestWorkspace(message);
     if (message.method === "session/request_permission") {
       allowPermissionRequest(message);
       return;
     }
 
     if (isReadTextFileMethod(message.method)) {
-      respond(message.id, await handleReadTextFile(message.params || {}));
+      respond(message.id, await handleReadTextFile(message.params || {}, state));
       return;
     }
 
     if (isWriteTextFileMethod(message.method)) {
-      respond(message.id, await handleWriteTextFile(message.params || {}));
+      respond(message.id, await handleWriteTextFile(message.params || {}, state));
       return;
     }
 
@@ -678,6 +764,11 @@ async function handleClientRequest(message) {
     const normalized = normalizeFileError(err);
     jsonrpcError(message.id, normalized.code, normalized.message, normalized.data);
   }
+}
+
+function clientRequestWorkspace(message) {
+  const sessionId = message.params?.sessionId || message.params?.session_id || message.sessionId || message.session_id;
+  return sessionId ? workspaceForSession(sessionId) : workspace();
 }
 
 function handleAgentMessage(message) {
@@ -773,6 +864,8 @@ return {
   resolveWorkspacePath,
   handleReadTextFile,
   handleWriteTextFile,
+  prepareWorkspaceRoot,
+  workspaceRootFor,
 };
 }
 
@@ -791,13 +884,15 @@ function adapterShellCommand() {
 }
 
 function main() {
+mkdirSync(defaultWorkspaceRoot, { recursive: true });
 const child = spawn("bash", ["-c", adapterShellCommand()], {
-  cwd,
+  cwd: defaultWorkspaceRoot,
   env: {
     ...process.env,
     PATH: [
       "/run/current-system/sw/bin",
       `${process.env.HOME || "/home/jettc"}/.local/bin`,
+      `${process.env.HOME || "/home/jettc"}/.cargo/bin`,
       `${process.env.HOME || "/home/jettc"}/.bun/bin`,
       `${process.env.HOME || "/home/jettc"}/.npm-global/bin`,
       process.env.PATH || "",

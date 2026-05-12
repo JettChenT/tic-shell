@@ -135,11 +135,13 @@ impl AgentBridge {
         workdir: PathBuf,
     ) -> Result<(Self, mpsc::UnboundedReceiver<AgentUpdate>)> {
         let bridge = repo_root.join("bin/tic-codex-agent");
+        std::fs::create_dir_all(&workdir)
+            .with_context(|| format!("failed to create {}", workdir.display()))?;
         let mut command = Command::new("bun");
         command
             .arg(&bridge)
             .current_dir(&workdir)
-            .env("TIC_CODEX_WORKDIR", &workdir)
+            .env("TIC_CODEX_WORKDIR_ROOT", &workdir)
             .env("TIC_SHELL_ROOT", &repo_root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

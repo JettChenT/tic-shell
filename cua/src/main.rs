@@ -65,7 +65,7 @@ struct Workspace {
     id: u64,
     idx: u64,
     name: Option<String>,
-    output: String,
+    output: Option<String>,
     is_active: bool,
     is_focused: bool,
     active_window_id: Option<u64>,
@@ -74,10 +74,14 @@ struct Workspace {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Window {
     id: u64,
-    title: String,
-    app_id: String,
-    pid: u32,
-    workspace_id: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    pid: Option<i32>,
+    #[serde(default)]
+    workspace_id: Option<u64>,
     is_focused: bool,
     is_floating: bool,
     is_urgent: bool,
@@ -86,15 +90,17 @@ struct Window {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct WindowLayout {
-    window_size: [u32; 2],
+    window_size: [i32; 2],
     tile_size: [f64; 2],
+    #[serde(default)]
+    tile_pos_in_workspace_view: Option<[f64; 2]>,
     window_offset_in_tile: [f64; 2],
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Output {
     name: String,
-    logical: LogicalOutput,
+    logical: Option<LogicalOutput>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -120,12 +126,12 @@ struct WindowInfo {
     id: u64,
     title: String,
     app_id: String,
-    pid: u32,
+    pid: Option<i32>,
     is_focused: bool,
     is_floating: bool,
     screenshot: Option<PathBuf>,
     screenshot_error: Option<String>,
-    size: [u32; 2],
+    size: [i32; 2],
 }
 
 #[derive(Debug, Serialize)]
@@ -157,7 +163,7 @@ fn main() -> Result<()> {
         }
         Commands::Click { window_id, x, y } => {
             let point = focus_and_resolve_point(&niri, window_id, Some((x, y)))?;
-            let mut input = Input::create(&niri.focused_output()?.logical)?;
+            let mut input = Input::create(&niri.focused_logical_output()?)?;
             input.mouse_move(point.0, point.1)?;
             input.click()?;
             print_json(
@@ -167,7 +173,7 @@ fn main() -> Result<()> {
         Commands::TypeText { window_id, text } => {
             niri.focus_window(window_id)?;
             thread::sleep(Duration::from_millis(120));
-            let mut input = Input::create(&niri.focused_output()?.logical)?;
+            let mut input = Input::create(&niri.focused_logical_output()?)?;
             input.type_text(&text)?;
             print_json(
                 &serde_json::json!({ "window_id": window_id, "typed_chars": text.chars().count() }),
@@ -181,7 +187,7 @@ fn main() -> Result<()> {
             y,
         } => {
             let point = focus_and_resolve_point(&niri, window_id, x.zip(y))?;
-            let mut input = Input::create(&niri.focused_output()?.logical)?;
+            let mut input = Input::create(&niri.focused_logical_output()?)?;
             input.mouse_move(point.0, point.1)?;
             input.scroll(direction, amount)?;
             print_json(
@@ -217,7 +223,7 @@ fn describe_workspace(
     let windows: Vec<Window> = niri
         .windows()?
         .into_iter()
-        .filter(|window| window.workspace_id == workspace.id)
+        .filter(|window| window.workspace_id == Some(workspace.id))
         .collect();
 
     let mut infos = Vec::with_capacity(windows.len());
@@ -233,8 +239,8 @@ fn describe_workspace(
         }
         infos.push(WindowInfo {
             id: window.id,
-            title: window.title,
-            app_id: window.app_id,
+            title: window.title.unwrap_or_else(|| "(untitled)".to_string()),
+            app_id: window.app_id.unwrap_or_default(),
             pid: window.pid,
             is_focused: window.is_focused,
             is_floating: window.is_floating,
@@ -310,13 +316,12 @@ fn focus_and_resolve_point(
         ));
     }
 
-    let output = niri.focused_output()?.logical;
+    let output = niri.focused_logical_output()?;
     let (window_x, window_y, _, _) = resolve_window_rect(&output, &window);
-    let (relative_x, relative_y) = point.unwrap_or((
-        window.layout.window_size[0] / 2,
-        window.layout.window_size[1] / 2,
-    ));
-    if relative_x >= window.layout.window_size[0] || relative_y >= window.layout.window_size[1] {
+    let width = window_width(&window)?;
+    let height = window_height(&window)?;
+    let (relative_x, relative_y) = point.unwrap_or((width / 2, height / 2));
+    if relative_x >= window_width(&window)? || relative_y >= window_height(&window)? {
         return Err(anyhow!(
             "coordinates ({relative_x}, {relative_y}) exceed focused window size {}x{}",
             window.layout.window_size[0],
@@ -341,16 +346,51 @@ fn focus_and_resolve_rect(niri: &Niri, window_id: u64) -> Result<(i32, i32, u32,
         ));
     }
 
-    let output = niri.focused_output()?.logical;
+    let output = niri.focused_logical_output()?;
     Ok(resolve_window_rect(&output, &window))
 }
 
 fn resolve_window_rect(output: &LogicalOutput, window: &Window) -> (i32, i32, u32, u32) {
-    let width = window.layout.window_size[0];
-    let height = window.layout.window_size[1];
-    let x = output.x + ((output.width.saturating_sub(width)) / 2) as i32;
-    let y = output.y + ((output.height.saturating_sub(height)) / 2) as i32;
+    let width = window_width(window).unwrap_or(1);
+    let height = window_height(window).unwrap_or(1);
+    let (x, y) = if let Some(tile_pos) = window.layout.tile_pos_in_workspace_view {
+        (
+            output.x + (tile_pos[0] + window.layout.window_offset_in_tile[0]).round() as i32,
+            output.y + (tile_pos[1] + window.layout.window_offset_in_tile[1]).round() as i32,
+        )
+    } else {
+        (
+            output.x + ((output.width.saturating_sub(width)) / 2) as i32,
+            output.y + ((output.height.saturating_sub(height)) / 2) as i32,
+        )
+    };
     (x, y, width, height)
+}
+
+fn window_width(window: &Window) -> Result<u32> {
+    u32::try_from(window.layout.window_size[0])
+        .ok()
+        .filter(|width| *width > 0)
+        .ok_or_else(|| {
+            anyhow!(
+                "window {} has invalid width {}",
+                window.id,
+                window.layout.window_size[0]
+            )
+        })
+}
+
+fn window_height(window: &Window) -> Result<u32> {
+    u32::try_from(window.layout.window_size[1])
+        .ok()
+        .filter(|height| *height > 0)
+        .ok_or_else(|| {
+            anyhow!(
+                "window {} has invalid height {}",
+                window.id,
+                window.layout.window_size[1]
+            )
+        })
 }
 
 fn make_composite(paths: &[PathBuf], out: &Path) -> Result<()> {
@@ -428,11 +468,17 @@ impl Niri {
     }
 
     fn focused_window(&self) -> Result<Window> {
-        self.msg_json(["--json", "focused-window"])
+        self.msg_json::<Option<Window>, _, _>(["--json", "focused-window"])?
+            .ok_or_else(|| anyhow!("niri reports no focused window"))
     }
 
-    fn focused_output(&self) -> Result<Output> {
-        self.msg_json(["--json", "focused-output"])
+    fn focused_logical_output(&self) -> Result<LogicalOutput> {
+        let output = self
+            .msg_json::<Option<Output>, _, _>(["--json", "focused-output"])?
+            .ok_or_else(|| anyhow!("niri reports no focused output"))?;
+        output
+            .logical
+            .ok_or_else(|| anyhow!("focused output {} has no logical mapping", output.name))
     }
 
     fn focus_window(&self, window_id: u64) -> Result<()> {
@@ -822,4 +868,48 @@ fn char_to_keys(c: char) -> Vec<uinput::event::keyboard::Key> {
         _ => {}
     }
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tiri_optional_ipc_shapes() {
+        let focused_window: Option<Window> = serde_json::from_str("null").unwrap();
+        assert!(focused_window.is_none());
+
+        let window: Window = serde_json::from_str(
+            r#"{
+                "id": 7,
+                "title": null,
+                "app_id": null,
+                "pid": null,
+                "workspace_id": null,
+                "is_focused": false,
+                "is_floating": false,
+                "is_urgent": false,
+                "layout": {
+                    "pos_in_scrolling_layout": [1, 1],
+                    "tile_size": [640.0, 480.0],
+                    "window_size": [640, 480],
+                    "tile_pos_in_workspace_view": null,
+                    "window_offset_in_tile": [0.0, 0.0]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(window.title, None);
+        assert_eq!(window.pid, None);
+        assert_eq!(window_width(&window).unwrap(), 640);
+
+        let output: Output = serde_json::from_str(
+            r#"{
+                "name": "HEADLESS-1",
+                "logical": null
+            }"#,
+        )
+        .unwrap();
+        assert!(output.logical.is_none());
+    }
 }
