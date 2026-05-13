@@ -11,6 +11,10 @@ build:
 check:
     cargo check --workspace
 
+# Install the local CUA CLI.
+install-cua:
+    cargo install --path cua --force
+
 # Run the integrated Noctalia left bar with the tic workspace rail.
 sidebar:
     bin/tic-sidebar start
