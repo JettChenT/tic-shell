@@ -5,14 +5,10 @@
       url = "github:noctalia-dev/noctalia-qs";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    tiri = {
-      url = "git+https://github.com/JettChenT/tiri.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
-    { nixpkgs, noctalia-qs, tiri, ... }:
+    { nixpkgs, noctalia-qs, ... }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -32,7 +28,15 @@
     {
       devShells = forAllSystems (pkgs: {
         default = pkgs.callPackage ./nix/shell.nix {
-          niri = tiri.packages.${pkgs.stdenv.hostPlatform.system}.niri;
+          niri = pkgs.runCommandLocal "tiri-debug-niri" { } ''
+            mkdir -p "$out/bin"
+            cat > "$out/bin/niri" <<'EOF'
+            #!${pkgs.runtimeShell}
+            unset LD_LIBRARY_PATH
+            exec /home/jettc/dev/tiri/target/debug/niri "$@"
+            EOF
+            chmod +x "$out/bin/niri"
+          '';
           quickshell = noctalia-qs.packages.${pkgs.stdenv.hostPlatform.system}.default;
         };
       });

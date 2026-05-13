@@ -5,8 +5,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 const runtimeDir = process.env.XDG_RUNTIME_DIR || os.tmpdir();
+const ticShellRoot = path.resolve(
+  process.env.TIC_SHELL_ROOT || path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+);
 const defaultWorkspaceRoot = path.resolve(
   process.env.TIC_CODEX_WORKDIR_ROOT || path.join(runtimeDir, "tic-shell", "codex-workspaces")
 );
@@ -405,7 +409,7 @@ function newSession(state = workspace()) {
 
   send("session/new", {
     cwd,
-    mcpServers: [],
+    mcpServers: [cuaMcpServer(state)],
   }, result => {
     state.sessionStarting = false;
     state.sessionId = result?.sessionId || "";
@@ -426,6 +430,41 @@ function newSession(state = workspace()) {
   }, state);
 }
 
+function cuaMcpServer(state = workspace()) {
+  const env = [
+    { name: "TIC_SHELL_ROOT", value: ticShellRoot },
+  ];
+  if (state.workspaceId) {
+    env.push({ name: "CUA_WORKSPACE_ID", value: state.workspaceId });
+  }
+
+  return {
+    name: "cua",
+    command: resolveCommand("cargo"),
+    args: [
+      "run",
+      "--quiet",
+      "--manifest-path",
+      path.join(ticShellRoot, "cua", "Cargo.toml"),
+      "--",
+      "mcp",
+    ],
+    env,
+  };
+}
+
+function resolveCommand(command) {
+  if (path.isAbsolute(command)) {
+    return command;
+  }
+
+  const result = spawnSync("bash", ["-lc", `command -v ${command}`], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : command;
+}
+
 function prepareWorkspaceRoot(state) {
   updateWorkspaceMetadata(state);
   mkdirSync(state.root, { recursive: true });
@@ -437,7 +476,6 @@ function prepareWorkspaceRoot(state) {
 function agentInstructions(state) {
   const workspaceLabel = state.workspaceId || state.title || state.key;
   const workspaceReference = state.workspaceId || "(current focused workspace)";
-  const describeCommand = state.workspaceId ? `cua describe-workspace ${state.workspaceId}` : "cua describe-workspace";
   return `# Codex Workspace ${workspaceLabel}
 
 You are running from a generated tic-shell ad-hoc workspace folder.
@@ -445,20 +483,22 @@ You are running from a generated tic-shell ad-hoc workspace folder.
 Current niri workspace:
 - Key: ${state.key}
 - Title: ${state.title}
-- Workspace number/id: ${workspaceReference}
+- Numeric workspace id/index: ${workspaceReference}
 
-Use the \`cua\` CLI for computer-use actions. It is expected to already be available in \`PATH\`.
+The \`cua\` MCP server is attached to this Codex session for computer-use actions.
+Use the MCP tools exposed by that server. Do not run the legacy \`cua ...\` shell CLI unless an MCP tool is unavailable or fails.
+The workspace \`Key\` is tic-shell UI metadata, not a CUA argument. Never pass values like \`niri:workspace:1\` as \`workspace_id\`; use the numeric id/index only, or omit \`workspace_id\` to use this session's workspace.
 
-Useful commands:
-- \`${describeCommand}\` inspects this workspace and captures window screenshots.
-- \`cua screenshot-window <window-id>\` captures a single window.
-- \`cua click <window-id> <x> <y>\` clicks inside a window at window-relative screenshot/image pixel coordinates.
-- \`cua type-text <window-id> "text"\` types into a focused window.
-- \`cua scroll <window-id> <up|down|left|right> <amount> [x] [y]\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels.
+Useful MCP tools:
+- \`view-window\` captures a single window and returns the PNG image directly. Prefer this when you already know the target window id.
+- \`describe-workspace\` returns window metadata plus a composite screenshot of this workspace. Use it when you need to discover window ids or get an overview.
+- \`click\` clicks inside a window at window-relative screenshot/image pixel coordinates.
+- \`type-text\` types into a window.
+- \`scroll\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels.
 
-When describing or acting on a workspace, run \`${describeCommand}\` first. Inspect the returned \`composite_screenshot\` image path with the available image-viewing tool before reasoning from metadata alone, then inspect individual window screenshots if the composite is not enough.
+Do not call \`describe-workspace\` as a reflex before every action. If a recent tool result already identified the window, call \`view-window\` directly to inspect it.
 
-The real tic-shell checkout is intentionally not your working directory. Use this folder for notes and temporary files, and use \`cua\` to inspect or act on the live desktop.
+The real tic-shell checkout is intentionally not your working directory. Use this folder for notes and temporary files, and use the \`cua\` MCP tools to inspect or act on the live desktop.
 `;
 }
 
@@ -873,6 +913,7 @@ return {
   handleWriteTextFile,
   prepareWorkspaceRoot,
   workspaceRootFor,
+  cuaMcpServer,
 };
 }
 

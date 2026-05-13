@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{GenericImage, ImageBuffer, Rgba};
 use serde::{Deserialize, Serialize};
@@ -6,9 +7,10 @@ use std::cmp;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{self, BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +28,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    #[command(alias = "server")]
+    Mcp,
     #[command(alias = "describe_workspace")]
     DescribeWorkspace { workspace_id: Option<u64> },
     #[command(alias = "screenshot_window")]
@@ -159,9 +163,14 @@ struct OptionalLogicalCoords {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Commands::Mcp) {
+        return run_mcp_server(cli.intrusive_fallback);
+    }
+
     let niri = Niri::discover()?;
 
     match cli.command {
+        Commands::Mcp => unreachable!("MCP mode is handled before niri discovery"),
         Commands::DescribeWorkspace { workspace_id } => {
             let output = describe_workspace(&niri, workspace_id, cli.intrusive_fallback)?;
             print_json(&output)?;
@@ -225,6 +234,356 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn run_mcp_server(intrusive_fallback: bool) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+
+    for line in stdin.lock().lines() {
+        let line = line.context("read MCP stdin")?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let request = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("cua MCP ignored invalid JSON: {err}");
+                continue;
+            }
+        };
+
+        if let Some(response) = handle_mcp_message(request, intrusive_fallback) {
+            writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+            stdout.flush()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_mcp_message(
+    message: serde_json::Value,
+    intrusive_fallback: bool,
+) -> Option<serde_json::Value> {
+    let id = message.get("id").cloned();
+    let method = message.get("method").and_then(|value| value.as_str())?;
+    let params = message
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    match method {
+        "initialize" => id.map(|id| mcp_result(id, initialize_result())),
+        "notifications/initialized" => None,
+        "ping" => id.map(|id| mcp_result(id, serde_json::json!({}))),
+        "tools/list" => id.map(|id| mcp_result(id, tools_list_result())),
+        "tools/call" => id.map(|id| {
+            let result = call_mcp_tool(params, intrusive_fallback).unwrap_or_else(|err| {
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": error_chain(&err) }],
+                    "isError": true
+                })
+            });
+            mcp_result(id, result)
+        }),
+        _ => id.map(|id| {
+            mcp_error(
+                id,
+                -32601,
+                format!("unsupported MCP method: {method}"),
+                None,
+            )
+        }),
+    }
+}
+
+fn initialize_result() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "tools": { "listChanged": false }
+        },
+        "serverInfo": {
+            "name": "tic-cua",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    })
+}
+
+fn tools_list_result() -> serde_json::Value {
+    serde_json::json!({
+        "tools": [
+            {
+                "name": "describe-workspace",
+                "description": "Return niri workspace/window metadata and a composite screenshot of the workspace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_id": {
+                            "type": "integer",
+                            "description": "Optional numeric niri workspace id or index, for example 1. Do not pass tic-shell keys like niri:workspace:1. Defaults to this MCP session's workspace via CUA_WORKSPACE_ID, then the focused workspace."
+                        },
+                        "intrusive_fallback": {
+                            "type": "boolean",
+                            "description": "Use grim after focusing windows if compositor-native screenshots are unavailable."
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "view-window",
+                "description": "Capture a single niri window and return the PNG image directly.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "window_id": {
+                            "type": "integer",
+                            "description": "The numeric niri window id to capture."
+                        },
+                        "intrusive_fallback": {
+                            "type": "boolean",
+                            "description": "Use grim after focusing the window if compositor-native screenshots are unavailable."
+                        }
+                    },
+                    "required": ["window_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "click",
+                "description": "Click inside a window at window-relative screenshot pixel coordinates.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "window_id": { "type": "integer" },
+                        "x": { "type": "integer", "minimum": 0 },
+                        "y": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["window_id", "x", "y"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "type-text",
+                "description": "Type text into a window.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "window_id": { "type": "integer" },
+                        "text": { "type": "string" }
+                    },
+                    "required": ["window_id", "text"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "scroll",
+                "description": "Scroll inside a window, optionally at window-relative screenshot pixel coordinates.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "window_id": { "type": "integer" },
+                        "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+                        "amount": { "type": "integer", "minimum": 0 },
+                        "x": { "type": "integer", "minimum": 0 },
+                        "y": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["window_id", "direction", "amount"],
+                    "additionalProperties": false
+                }
+            }
+        ]
+    })
+}
+
+fn call_mcp_tool(
+    params: serde_json::Value,
+    server_intrusive_fallback: bool,
+) -> Result<serde_json::Value> {
+    let name = params
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("tools/call is missing params.name"))?;
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let niri = Niri::discover()?;
+    let intrusive_fallback =
+        bool_arg(&args, "intrusive_fallback").unwrap_or(server_intrusive_fallback);
+
+    match name {
+        "describe-workspace" => {
+            let workspace_id = optional_u64_arg(&args, "workspace_id")?;
+            let output = describe_workspace(&niri, workspace_id, intrusive_fallback)?;
+            let mut content = vec![text_content(&serde_json::to_string_pretty(&output)?)];
+            if let Some(path) = &output.composite_screenshot {
+                content.push(image_content(path)?);
+            }
+            Ok(serde_json::json!({ "content": content }))
+        }
+        "view-window" => {
+            let window_id = required_u64_arg(&args, "window_id")?;
+            let path = screenshot_window(&niri, window_id, &capture_dir()?, intrusive_fallback)?;
+            let window = niri.window(window_id)?;
+            let output = ScreenshotOutput {
+                window_id,
+                path: path.clone(),
+                size: image_size(&path).ok(),
+                scale: niri.window_scale(&window).ok(),
+                coordinate_space: "screenshot_pixels",
+            };
+            Ok(serde_json::json!({
+                "content": [
+                    text_content(&serde_json::to_string_pretty(&output)?),
+                    image_content(&path)?
+                ]
+            }))
+        }
+        "click" => {
+            let window_id = required_u64_arg(&args, "window_id")?;
+            let x = required_u32_arg(&args, "x")?;
+            let y = required_u32_arg(&args, "y")?;
+            let (logical_x, logical_y, scale) = niri.screenshot_to_logical(window_id, x, y)?;
+            niri.cua_click(window_id, logical_x, logical_y)?;
+            Ok(serde_json::json!({
+                "content": [text_content(&serde_json::json!({
+                    "window_id": window_id,
+                    "clicked": { "x": x, "y": y },
+                    "coordinate_space": "screenshot_pixels",
+                    "sent_logical": { "x": logical_x, "y": logical_y },
+                    "scale": scale
+                }).to_string())]
+            }))
+        }
+        "type-text" => {
+            let window_id = required_u64_arg(&args, "window_id")?;
+            let text = args
+                .get("text")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow!("missing required string argument text"))?;
+            niri.cua_type_text(window_id, text)?;
+            Ok(serde_json::json!({
+                "content": [text_content(&serde_json::json!({
+                    "window_id": window_id,
+                    "typed_chars": text.chars().count()
+                }).to_string())]
+            }))
+        }
+        "scroll" => {
+            let window_id = required_u64_arg(&args, "window_id")?;
+            let direction = scroll_direction_arg(&args)?;
+            let amount = required_u32_arg(&args, "amount")?;
+            let x = optional_u32_arg(&args, "x")?;
+            let y = optional_u32_arg(&args, "y")?;
+            let transformed = niri.optional_screenshot_to_logical(window_id, x, y)?;
+            niri.cua_scroll(
+                window_id,
+                direction,
+                amount,
+                transformed.logical_x,
+                transformed.logical_y,
+            )?;
+            Ok(serde_json::json!({
+                "content": [text_content(&serde_json::json!({
+                    "window_id": window_id,
+                    "scrolled": amount,
+                    "coordinate_space": "screenshot_pixels",
+                    "sent_logical": { "x": transformed.logical_x, "y": transformed.logical_y },
+                    "scale": transformed.scale
+                }).to_string())]
+            }))
+        }
+        _ => Err(anyhow!("unknown CUA tool: {name}")),
+    }
+}
+
+fn mcp_result(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn mcp_error(
+    id: serde_json::Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message.into(),
+            "data": data
+        }
+    })
+}
+
+fn text_content(text: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "text", "text": text })
+}
+
+fn image_content(path: &Path) -> Result<serde_json::Value> {
+    let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(serde_json::json!({
+        "type": "image",
+        "data": base64::engine::general_purpose::STANDARD.encode(data),
+        "mimeType": "image/png"
+    }))
+}
+
+fn bool_arg(args: &serde_json::Value, name: &str) -> Option<bool> {
+    args.get(name).and_then(|value| value.as_bool())
+}
+
+fn optional_u64_arg(args: &serde_json::Value, name: &str) -> Result<Option<u64>> {
+    args.get(name).map(parse_u64_arg).transpose()
+}
+
+fn required_u64_arg(args: &serde_json::Value, name: &str) -> Result<u64> {
+    optional_u64_arg(args, name)?.ok_or_else(|| anyhow!("missing required integer argument {name}"))
+}
+
+fn optional_u32_arg(args: &serde_json::Value, name: &str) -> Result<Option<u32>> {
+    args.get(name)
+        .map(parse_u64_arg)
+        .transpose()?
+        .map(|value| u32::try_from(value).context(format!("{name} exceeds u32")))
+        .transpose()
+}
+
+fn required_u32_arg(args: &serde_json::Value, name: &str) -> Result<u32> {
+    optional_u32_arg(args, name)?.ok_or_else(|| anyhow!("missing required integer argument {name}"))
+}
+
+fn parse_u64_arg(value: &serde_json::Value) -> Result<u64> {
+    if let Some(number) = value.as_u64() {
+        return Ok(number);
+    }
+    if let Some(text) = value.as_str() {
+        return text
+            .parse()
+            .with_context(|| format!("invalid integer argument {text:?}"));
+    }
+    Err(anyhow!("expected integer or integer string, got {value}"))
+}
+
+fn scroll_direction_arg(args: &serde_json::Value) -> Result<ScrollDirection> {
+    match args
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+    {
+        "up" | "Up" => Ok(ScrollDirection::Up),
+        "down" | "Down" => Ok(ScrollDirection::Down),
+        "left" | "Left" => Ok(ScrollDirection::Left),
+        "right" | "Right" => Ok(ScrollDirection::Right),
+        other => Err(anyhow!("invalid scroll direction {other:?}")),
+    }
+}
+
 fn describe_workspace(
     niri: &Niri,
     workspace_id: Option<u64>,
@@ -258,7 +617,7 @@ fn describe_workspace(
         let screenshot_result = screenshot_window(niri, window.id, &dir, intrusive_fallback);
         let (screenshot, screenshot_error) = match screenshot_result {
             Ok(path) => (Some(path), None),
-            Err(err) => (None, Some(err.to_string())),
+            Err(err) => (None, Some(error_chain(&err))),
         };
         let screenshot_size = screenshot.as_deref().and_then(|path| image_size(path).ok());
         let scale = niri.window_scale(&window).ok();
@@ -322,13 +681,18 @@ fn screenshot_window(
         }
     }
 
+    screenshot_window_with_grim(niri, window_id, &path)?;
+    Ok(path)
+}
+
+fn screenshot_window_with_grim(niri: &Niri, window_id: u64, path: &Path) -> Result<()> {
     let (x, y, width, height) = focus_and_resolve_rect(niri, window_id)?;
     niri.grim(
         &format!("{x},{y} {width}x{height}"),
         path.to_str()
             .ok_or_else(|| anyhow!("non-utf8 screenshot path"))?,
     )?;
-    Ok(path)
+    Ok(())
 }
 
 fn focus_and_resolve_rect(niri: &Niri, window_id: u64) -> Result<(i32, i32, u32, u32)> {
@@ -449,6 +813,13 @@ fn env_workspace_id() -> Option<u64> {
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn error_chain(err: &anyhow::Error) -> String {
+    err.chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 struct Niri {
@@ -653,6 +1024,7 @@ impl Niri {
         self.env.apply(&mut command);
         let output = command
             .args(["-g", geometry, path])
+            .stdin(Stdio::null())
             .output()
             .context("run grim")?;
         if !output.status.success() {
@@ -696,7 +1068,10 @@ impl Niri {
             command.arg(arg.as_ref());
         }
 
-        let output = command.output().context("run niri msg")?;
+        let output = command
+            .stdin(Stdio::null())
+            .output()
+            .context("run niri msg")?;
         if !output.status.success() {
             return Err(anyhow!(
                 "niri msg failed: {}\nstdout: {}\nstderr: {}",

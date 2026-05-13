@@ -226,12 +226,14 @@ test("workspace setup creates per-workspace AGENTS instructions", async () => {
     const agentsMd = await readFile(path.join(workspaceRoot, "AGENTS.md"), "utf8");
 
     assert.equal(workspaceRoot, path.join(root, "workspace-2"));
-    assert.match(agentsMd, /Workspace number\/id: 2/);
-    assert.match(agentsMd, /cua describe-workspace 2/);
-    assert.match(agentsMd, /expected to already be available in `PATH`/);
+    assert.match(agentsMd, /Numeric workspace id\/index: 2/);
+    assert.match(agentsMd, /Never pass values like `niri:workspace:1` as `workspace_id`/);
+    assert.match(agentsMd, /`cua` MCP server is attached/);
+    assert.match(agentsMd, /Do not run the legacy `cua \.\.\.` shell CLI/);
+    assert.match(agentsMd, /`view-window` captures a single window/);
+    assert.match(agentsMd, /`describe-workspace` returns window metadata plus a composite screenshot/);
     assert.match(agentsMd, /window-relative screenshot\/image pixel coordinates/);
-    assert.match(agentsMd, /composite_screenshot/);
-    assert.match(agentsMd, /image-viewing tool/);
+    assert.match(agentsMd, /Do not call `describe-workspace` as a reflex/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -250,6 +252,31 @@ test("workspace sessions use distinct ad-hoc folders as cwd", () => {
 
   client.setActiveWorkspace("niri:workspace:2", "2");
   assert.equal(writes.findLast(write => write.method === "session/new").params.cwd, path.join(root, "workspace-2"));
+});
+
+test("workspace sessions attach the CUA MCP server", () => {
+  const root = path.join(testRoot, "session-mcp");
+  const { client, writes } = makeClient({ workspaceRoot: root });
+
+  client.initialize();
+  respondTo(writes, client, "initialize", {});
+  const defaultSession = writes.findLast(write => write.method === "session/new");
+  assert.equal(defaultSession.params.mcpServers.length, 1);
+  assert.equal(defaultSession.params.mcpServers[0].name, "cua");
+  assert.ok(path.isAbsolute(defaultSession.params.mcpServers[0].command));
+  assert.deepEqual(defaultSession.params.mcpServers[0].args.slice(0, 4), [
+    "run",
+    "--quiet",
+    "--manifest-path",
+    path.resolve("cua/Cargo.toml"),
+  ]);
+
+  client.setActiveWorkspace("niri:workspace:2", "2");
+  const workspaceSession = writes.findLast(write => write.method === "session/new");
+  assert.deepEqual(workspaceSession.params.mcpServers[0].env.find(item => item.name === "CUA_WORKSPACE_ID"), {
+    name: "CUA_WORKSPACE_ID",
+    value: "2",
+  });
 });
 
 test("workspaces get independent ACP sessions and transcripts", () => {
