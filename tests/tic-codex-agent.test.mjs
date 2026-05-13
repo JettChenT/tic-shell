@@ -229,6 +229,7 @@ test("workspace setup creates per-workspace AGENTS instructions", async () => {
     assert.match(agentsMd, /Workspace number\/id: 2/);
     assert.match(agentsMd, /cua describe-workspace 2/);
     assert.match(agentsMd, /expected to already be available in `PATH`/);
+    assert.match(agentsMd, /window-relative screenshot\/image pixel coordinates/);
     assert.match(agentsMd, /composite_screenshot/);
     assert.match(agentsMd, /image-viewing tool/);
   } finally {

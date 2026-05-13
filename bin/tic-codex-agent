@@ -452,9 +452,9 @@ Use the \`cua\` CLI for computer-use actions. It is expected to already be avail
 Useful commands:
 - \`${describeCommand}\` inspects this workspace and captures window screenshots.
 - \`cua screenshot-window <window-id>\` captures a single window.
-- \`cua click <window-id> <x> <y>\` clicks inside a window at window-relative coordinates.
+- \`cua click <window-id> <x> <y>\` clicks inside a window at window-relative screenshot/image pixel coordinates.
 - \`cua type-text <window-id> "text"\` types into a focused window.
-- \`cua scroll <window-id> <up|down|left|right> <amount> [x] [y]\` scrolls in a window.
+- \`cua scroll <window-id> <up|down|left|right> <amount> [x] [y]\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels.
 
 When describing or acting on a workspace, run \`${describeCommand}\` first. Inspect the returned \`composite_screenshot\` image path with the available image-viewing tool before reasoning from metadata alone, then inspect individual window screenshots if the composite is not enough.
 

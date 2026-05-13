@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{GenericImage, ImageBuffer, Rgba};
 use serde::{Deserialize, Serialize};
 use std::cmp;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -26,28 +27,25 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(alias = "describe_workspace")]
-    DescribeWorkspace {
-        workspace_id: Option<u64>,
-    },
+    DescribeWorkspace { workspace_id: Option<u64> },
     #[command(alias = "screenshot_window")]
-    ScreenshotWindow {
-        window_id: u64,
-    },
+    ScreenshotWindow { window_id: u64 },
     Click {
         window_id: u64,
+        #[arg(help = "Window-relative X coordinate in screenshot/image pixels")]
         x: u32,
+        #[arg(help = "Window-relative Y coordinate in screenshot/image pixels")]
         y: u32,
     },
     #[command(alias = "type")]
-    TypeText {
-        window_id: u64,
-        text: String,
-    },
+    TypeText { window_id: u64, text: String },
     Scroll {
         window_id: u64,
         direction: ScrollDirection,
         amount: u32,
+        #[arg(help = "Optional window-relative X coordinate in screenshot/image pixels")]
         x: Option<u32>,
+        #[arg(help = "Optional window-relative Y coordinate in screenshot/image pixels")]
         y: Option<u32>,
     },
 }
@@ -132,12 +130,18 @@ struct WindowInfo {
     screenshot: Option<PathBuf>,
     screenshot_error: Option<String>,
     size: [i32; 2],
+    screenshot_size: Option<[u32; 2]>,
+    scale: Option<f64>,
+    coordinate_space: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 struct ScreenshotOutput {
     window_id: u64,
     path: PathBuf,
+    size: Option<[u32; 2]>,
+    scale: Option<f64>,
+    coordinate_space: &'static str,
 }
 
 #[derive(Clone)]
@@ -145,6 +149,12 @@ struct EnvDefaults {
     niri_socket: Option<PathBuf>,
     xdg_runtime_dir: Option<PathBuf>,
     wayland_display: Option<String>,
+}
+
+struct OptionalLogicalCoords {
+    logical_x: Option<u32>,
+    logical_y: Option<u32>,
+    scale: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -159,13 +169,27 @@ fn main() -> Result<()> {
         Commands::ScreenshotWindow { window_id } => {
             let path =
                 screenshot_window(&niri, window_id, &capture_dir()?, cli.intrusive_fallback)?;
-            print_json(&ScreenshotOutput { window_id, path })?;
+            let window = niri.window(window_id)?;
+            let scale = niri.window_scale(&window).ok();
+            let size = image_size(&path).ok();
+            print_json(&ScreenshotOutput {
+                window_id,
+                path,
+                size,
+                scale,
+                coordinate_space: "screenshot_pixels",
+            })?;
         }
         Commands::Click { window_id, x, y } => {
-            niri.cua_click(window_id, x, y)?;
-            print_json(
-                &serde_json::json!({ "window_id": window_id, "clicked": { "x": x, "y": y } }),
-            )?;
+            let (logical_x, logical_y, scale) = niri.screenshot_to_logical(window_id, x, y)?;
+            niri.cua_click(window_id, logical_x, logical_y)?;
+            print_json(&serde_json::json!({
+                "window_id": window_id,
+                "clicked": { "x": x, "y": y },
+                "coordinate_space": "screenshot_pixels",
+                "sent_logical": { "x": logical_x, "y": logical_y },
+                "scale": scale
+            }))?;
         }
         Commands::TypeText { window_id, text } => {
             niri.cua_type_text(window_id, &text)?;
@@ -180,8 +204,21 @@ fn main() -> Result<()> {
             x,
             y,
         } => {
-            niri.cua_scroll(window_id, direction, amount, x, y)?;
-            print_json(&serde_json::json!({ "window_id": window_id, "scrolled": amount }))?;
+            let transformed = niri.optional_screenshot_to_logical(window_id, x, y)?;
+            niri.cua_scroll(
+                window_id,
+                direction,
+                amount,
+                transformed.logical_x,
+                transformed.logical_y,
+            )?;
+            print_json(&serde_json::json!({
+                "window_id": window_id,
+                "scrolled": amount,
+                "coordinate_space": "screenshot_pixels",
+                "sent_logical": { "x": transformed.logical_x, "y": transformed.logical_y },
+                "scale": transformed.scale
+            }))?;
         }
     }
 
@@ -223,6 +260,8 @@ fn describe_workspace(
             Ok(path) => (Some(path), None),
             Err(err) => (None, Some(err.to_string())),
         };
+        let screenshot_size = screenshot.as_deref().and_then(|path| image_size(path).ok());
+        let scale = niri.window_scale(&window).ok();
         if let Some(path) = &screenshot {
             screenshots.push(path.clone());
         }
@@ -236,6 +275,9 @@ fn describe_workspace(
             screenshot,
             screenshot_error,
             size: window.layout.window_size,
+            screenshot_size,
+            scale,
+            coordinate_space: "screenshot_pixels",
         });
     }
 
@@ -268,11 +310,11 @@ fn screenshot_window(
 ) -> Result<PathBuf> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("window-{window_id}.png"));
-    match niri.screenshot_window(window_id, &path, false) {
+    match niri.cua_screenshot_window(window_id, &path, false) {
         Ok(()) => return Ok(path),
         Err(err) if !intrusive_fallback => {
             return Err(err).with_context(|| {
-                "non-intrusive niri screenshot failed; pass --intrusive-fallback to use grim after focusing the window"
+                "CUA-aligned niri screenshot failed; pass --intrusive-fallback to use grim after focusing the window"
             });
         }
         Err(_) => {
@@ -339,6 +381,19 @@ fn window_height(window: &Window) -> Result<u32> {
                 window.layout.window_size[1]
             )
         })
+}
+
+fn image_size(path: &Path) -> Result<[u32; 2]> {
+    let (width, height) =
+        image::image_dimensions(path).with_context(|| format!("read {}", path.display()))?;
+    Ok([width, height])
+}
+
+fn screenshot_coord_to_logical(coord: u32, scale: f64) -> Result<u32> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(anyhow!("invalid output scale {scale}"));
+    }
+    Ok((f64::from(coord) / scale).round().max(0.0) as u32)
 }
 
 fn make_composite(paths: &[PathBuf], out: &Path) -> Result<()> {
@@ -416,7 +471,14 @@ impl Niri {
     }
 
     fn outputs(&self) -> Result<Vec<Output>> {
-        self.msg_json(["--json", "outputs"])
+        let value: serde_json::Value = self.msg_json(["--json", "outputs"])?;
+        if value.is_array() {
+            serde_json::from_value(value).context("parse niri outputs array")
+        } else {
+            let outputs: HashMap<String, Output> =
+                serde_json::from_value(value).context("parse niri outputs map")?;
+            Ok(outputs.into_values().collect())
+        }
     }
 
     fn window(&self, window_id: u64) -> Result<Window> {
@@ -458,6 +520,47 @@ impl Niri {
         output
             .logical
             .ok_or_else(|| anyhow!("output {output_name} has no logical mapping"))
+    }
+
+    fn window_scale(&self, window: &Window) -> Result<f64> {
+        Ok(self.logical_output_for_window(window)?.scale)
+    }
+
+    fn screenshot_to_logical(&self, window_id: u64, x: u32, y: u32) -> Result<(u32, u32, f64)> {
+        let window = self.window(window_id)?;
+        let scale = self.window_scale(&window)?;
+        Ok((
+            screenshot_coord_to_logical(x, scale)?,
+            screenshot_coord_to_logical(y, scale)?,
+            scale,
+        ))
+    }
+
+    fn optional_screenshot_to_logical(
+        &self,
+        window_id: u64,
+        x: Option<u32>,
+        y: Option<u32>,
+    ) -> Result<OptionalLogicalCoords> {
+        if x.is_none() && y.is_none() {
+            return Ok(OptionalLogicalCoords {
+                logical_x: None,
+                logical_y: None,
+                scale: None,
+            });
+        }
+
+        let window = self.window(window_id)?;
+        let scale = self.window_scale(&window)?;
+        Ok(OptionalLogicalCoords {
+            logical_x: x
+                .map(|coord| screenshot_coord_to_logical(coord, scale))
+                .transpose()?,
+            logical_y: y
+                .map(|coord| screenshot_coord_to_logical(coord, scale))
+                .transpose()?,
+            scale: Some(scale),
+        })
     }
 
     fn focus_window(&self, window_id: u64) -> Result<()> {
@@ -526,19 +629,17 @@ impl Niri {
         self.msg(args)
     }
 
-    fn screenshot_window(&self, window_id: u64, path: &Path, notify: bool) -> Result<()> {
+    fn cua_screenshot_window(&self, window_id: u64, path: &Path, notify: bool) -> Result<()> {
         let path = path
             .to_str()
             .ok_or_else(|| anyhow!("non-utf8 screenshot path"))?;
         self.msg([
             "action",
-            "screenshot-window",
+            "cua-screenshot-window",
             "--id",
             &window_id.to_string(),
             "--write-to-disk",
             "true",
-            "--show-pointer",
-            "false",
             "--notify",
             if notify { "true" } else { "false" },
             "--path",
@@ -770,5 +871,39 @@ mod tests {
         )
         .unwrap();
         assert!(output.logical.is_none());
+    }
+
+    #[test]
+    fn parses_tiri_outputs_map_shape() {
+        let outputs: HashMap<String, Output> = serde_json::from_str(
+            r#"{
+                "eDP-1": {
+                    "name": "eDP-1",
+                    "logical": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 1680,
+                        "height": 1120,
+                        "scale": 1.5
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(outputs["eDP-1"].logical.as_ref().unwrap().scale, 1.5);
+    }
+
+    #[test]
+    fn converts_screenshot_pixels_to_logical_coordinates() {
+        assert_eq!(screenshot_coord_to_logical(0, 1.5).unwrap(), 0);
+        assert_eq!(screenshot_coord_to_logical(148, 1.5).unwrap(), 99);
+        assert_eq!(screenshot_coord_to_logical(270, 1.5).unwrap(), 180);
+        assert_eq!(screenshot_coord_to_logical(410, 1.5).unwrap(), 273);
+    }
+
+    #[test]
+    fn rejects_invalid_coordinate_scale() {
+        assert!(screenshot_coord_to_logical(10, 0.0).is_err());
+        assert!(screenshot_coord_to_logical(10, f64::NAN).is_err());
     }
 }
