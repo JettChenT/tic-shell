@@ -2,12 +2,19 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{GenericImage, ImageBuffer, Rgba};
+use rmcp::{
+    ServerHandler, ServiceExt,
+    handler::server::wrapper::Parameters,
+    model::{CallToolResult, Content},
+    schemars::JsonSchema,
+    tool, tool_handler, tool_router,
+    transport::io::stdio,
+};
 use serde::{Deserialize, Serialize};
 use std::cmp;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,6 +63,64 @@ enum Commands {
 
 #[derive(Clone, Debug, ValueEnum)]
 enum ScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DescribeWorkspaceParams {
+    /// Optional numeric niri workspace id or index, for example 1. Do not pass tic-shell keys like niri:workspace:1. Defaults to this MCP session's workspace via CUA_WORKSPACE_ID, then the focused workspace.
+    workspace_id: Option<u64>,
+    /// Use grim after focusing windows if compositor-native screenshots are unavailable.
+    intrusive_fallback: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ViewWindowParams {
+    /// The numeric niri window id to capture.
+    window_id: u64,
+    /// Use grim after focusing the window if compositor-native screenshots are unavailable.
+    intrusive_fallback: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ClickParams {
+    /// The numeric niri window id to click.
+    window_id: u64,
+    /// Window-relative X coordinate in screenshot/image pixels.
+    x: u32,
+    /// Window-relative Y coordinate in screenshot/image pixels.
+    y: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TypeTextParams {
+    /// The numeric niri window id to type into.
+    window_id: u64,
+    /// Text to type into the window.
+    text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ScrollParams {
+    /// The numeric niri window id to scroll.
+    window_id: u64,
+    /// Scroll direction: up, down, left, or right.
+    direction: McpScrollDirection,
+    /// Scroll amount in logical compositor units.
+    amount: u32,
+    /// Optional window-relative X coordinate in screenshot/image pixels.
+    x: Option<u32>,
+    /// Optional window-relative Y coordinate in screenshot/image pixels.
+    y: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(rename_all = "lowercase")]
+enum McpScrollDirection {
     Up,
     Down,
     Left,
@@ -235,353 +300,186 @@ fn main() -> Result<()> {
 }
 
 fn run_mcp_server(intrusive_fallback: bool) -> Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
-
-    for line in stdin.lock().lines() {
-        let line = line.context("read MCP stdin")?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let request = match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("cua MCP ignored invalid JSON: {err}");
-                continue;
-            }
-        };
-
-        if let Some(response) = handle_mcp_message(request, intrusive_fallback) {
-            writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
-            stdout.flush()?;
-        }
-    }
-
-    Ok(())
+    tokio::runtime::Runtime::new()?
+        .block_on(async move {
+            CuaMcpServer { intrusive_fallback }
+                .serve(stdio())
+                .await?
+                .waiting()
+                .await?;
+            anyhow::Ok(())
+        })
+        .context("run CUA MCP server")
 }
 
-fn handle_mcp_message(
-    message: serde_json::Value,
+#[derive(Debug, Clone)]
+struct CuaMcpServer {
     intrusive_fallback: bool,
-) -> Option<serde_json::Value> {
-    let id = message.get("id").cloned();
-    let method = message.get("method").and_then(|value| value.as_str())?;
-    let params = message
-        .get("params")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+}
 
-    match method {
-        "initialize" => id.map(|id| mcp_result(id, initialize_result())),
-        "notifications/initialized" => None,
-        "ping" => id.map(|id| mcp_result(id, serde_json::json!({}))),
-        "tools/list" => id.map(|id| mcp_result(id, tools_list_result())),
-        "tools/call" => id.map(|id| {
-            let result = call_mcp_tool(params, intrusive_fallback).unwrap_or_else(|err| {
-                serde_json::json!({
-                    "content": [{ "type": "text", "text": error_chain(&err) }],
-                    "isError": true
-                })
-            });
-            mcp_result(id, result)
-        }),
-        _ => id.map(|id| {
-            mcp_error(
-                id,
-                -32601,
-                format!("unsupported MCP method: {method}"),
-                None,
-            )
-        }),
+#[tool_router]
+impl CuaMcpServer {
+    #[tool(
+        name = "describe-workspace",
+        description = "Return niri workspace/window metadata and a composite screenshot of the workspace."
+    )]
+    fn describe_workspace(
+        &self,
+        Parameters(params): Parameters<DescribeWorkspaceParams>,
+    ) -> CallToolResult {
+        self.describe_workspace_inner(params)
+            .unwrap_or_else(tool_error)
+    }
+
+    #[tool(
+        name = "view-window",
+        description = "Capture a single niri window and return the PNG image directly."
+    )]
+    fn view_window(&self, Parameters(params): Parameters<ViewWindowParams>) -> CallToolResult {
+        self.view_window_inner(params).unwrap_or_else(tool_error)
+    }
+
+    #[tool(
+        name = "click",
+        description = "Click inside a window at window-relative screenshot pixel coordinates."
+    )]
+    fn click(&self, Parameters(params): Parameters<ClickParams>) -> CallToolResult {
+        self.click_inner(params).unwrap_or_else(tool_error)
+    }
+
+    #[tool(name = "type-text", description = "Type text into a window.")]
+    fn type_text(&self, Parameters(params): Parameters<TypeTextParams>) -> CallToolResult {
+        self.type_text_inner(params).unwrap_or_else(tool_error)
+    }
+
+    #[tool(
+        name = "scroll",
+        description = "Scroll inside a window, optionally at window-relative screenshot pixel coordinates."
+    )]
+    fn scroll(&self, Parameters(params): Parameters<ScrollParams>) -> CallToolResult {
+        self.scroll_inner(params).unwrap_or_else(tool_error)
     }
 }
 
-fn initialize_result() -> serde_json::Value {
-    serde_json::json!({
-        "protocolVersion": "2024-11-05",
-        "capabilities": {
-            "tools": { "listChanged": false }
-        },
-        "serverInfo": {
-            "name": "tic-cua",
-            "version": env!("CARGO_PKG_VERSION")
-        }
-    })
-}
+#[tool_handler(name = "tic-cua", version = "0.1.0")]
+impl ServerHandler for CuaMcpServer {}
 
-fn tools_list_result() -> serde_json::Value {
-    serde_json::json!({
-        "tools": [
-            {
-                "name": "describe-workspace",
-                "description": "Return niri workspace/window metadata and a composite screenshot of the workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "workspace_id": {
-                            "type": "integer",
-                            "description": "Optional numeric niri workspace id or index, for example 1. Do not pass tic-shell keys like niri:workspace:1. Defaults to this MCP session's workspace via CUA_WORKSPACE_ID, then the focused workspace."
-                        },
-                        "intrusive_fallback": {
-                            "type": "boolean",
-                            "description": "Use grim after focusing windows if compositor-native screenshots are unavailable."
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "view-window",
-                "description": "Capture a single niri window and return the PNG image directly.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "window_id": {
-                            "type": "integer",
-                            "description": "The numeric niri window id to capture."
-                        },
-                        "intrusive_fallback": {
-                            "type": "boolean",
-                            "description": "Use grim after focusing the window if compositor-native screenshots are unavailable."
-                        }
-                    },
-                    "required": ["window_id"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "click",
-                "description": "Click inside a window at window-relative screenshot pixel coordinates.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "window_id": { "type": "integer" },
-                        "x": { "type": "integer", "minimum": 0 },
-                        "y": { "type": "integer", "minimum": 0 }
-                    },
-                    "required": ["window_id", "x", "y"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "type-text",
-                "description": "Type text into a window.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "window_id": { "type": "integer" },
-                        "text": { "type": "string" }
-                    },
-                    "required": ["window_id", "text"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "scroll",
-                "description": "Scroll inside a window, optionally at window-relative screenshot pixel coordinates.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "window_id": { "type": "integer" },
-                        "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
-                        "amount": { "type": "integer", "minimum": 0 },
-                        "x": { "type": "integer", "minimum": 0 },
-                        "y": { "type": "integer", "minimum": 0 }
-                    },
-                    "required": ["window_id", "direction", "amount"],
-                    "additionalProperties": false
-                }
-            }
-        ]
-    })
-}
+impl CuaMcpServer {
+    fn intrusive_fallback(&self, override_value: Option<bool>) -> bool {
+        override_value.unwrap_or(self.intrusive_fallback)
+    }
 
-fn call_mcp_tool(
-    params: serde_json::Value,
-    server_intrusive_fallback: bool,
-) -> Result<serde_json::Value> {
-    let name = params
-        .get("name")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow!("tools/call is missing params.name"))?;
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let niri = Niri::discover()?;
-    let intrusive_fallback =
-        bool_arg(&args, "intrusive_fallback").unwrap_or(server_intrusive_fallback);
+    fn describe_workspace_inner(&self, params: DescribeWorkspaceParams) -> Result<CallToolResult> {
+        let niri = Niri::discover()?;
+        let output = describe_workspace(
+            &niri,
+            params.workspace_id,
+            self.intrusive_fallback(params.intrusive_fallback),
+        )?;
+        let mut content = vec![Content::text(serde_json::to_string_pretty(&output)?)];
+        if let Some(path) = &output.composite_screenshot {
+            content.push(image_content(path)?);
+        }
+        Ok(CallToolResult::success(content))
+    }
 
-    match name {
-        "describe-workspace" => {
-            let workspace_id = optional_u64_arg(&args, "workspace_id")?;
-            let output = describe_workspace(&niri, workspace_id, intrusive_fallback)?;
-            let mut content = vec![text_content(&serde_json::to_string_pretty(&output)?)];
-            if let Some(path) = &output.composite_screenshot {
-                content.push(image_content(path)?);
-            }
-            Ok(serde_json::json!({ "content": content }))
-        }
-        "view-window" => {
-            let window_id = required_u64_arg(&args, "window_id")?;
-            let path = screenshot_window(&niri, window_id, &capture_dir()?, intrusive_fallback)?;
-            let window = niri.window(window_id)?;
-            let output = ScreenshotOutput {
-                window_id,
-                path: path.clone(),
-                size: image_size(&path).ok(),
-                scale: niri.window_scale(&window).ok(),
-                coordinate_space: "screenshot_pixels",
-            };
-            Ok(serde_json::json!({
-                "content": [
-                    text_content(&serde_json::to_string_pretty(&output)?),
-                    image_content(&path)?
-                ]
-            }))
-        }
-        "click" => {
-            let window_id = required_u64_arg(&args, "window_id")?;
-            let x = required_u32_arg(&args, "x")?;
-            let y = required_u32_arg(&args, "y")?;
-            let (logical_x, logical_y, scale) = niri.screenshot_to_logical(window_id, x, y)?;
-            niri.cua_click(window_id, logical_x, logical_y)?;
-            Ok(serde_json::json!({
-                "content": [text_content(&serde_json::json!({
-                    "window_id": window_id,
-                    "clicked": { "x": x, "y": y },
-                    "coordinate_space": "screenshot_pixels",
-                    "sent_logical": { "x": logical_x, "y": logical_y },
-                    "scale": scale
-                }).to_string())]
-            }))
-        }
-        "type-text" => {
-            let window_id = required_u64_arg(&args, "window_id")?;
-            let text = args
-                .get("text")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| anyhow!("missing required string argument text"))?;
-            niri.cua_type_text(window_id, text)?;
-            Ok(serde_json::json!({
-                "content": [text_content(&serde_json::json!({
-                    "window_id": window_id,
-                    "typed_chars": text.chars().count()
-                }).to_string())]
-            }))
-        }
-        "scroll" => {
-            let window_id = required_u64_arg(&args, "window_id")?;
-            let direction = scroll_direction_arg(&args)?;
-            let amount = required_u32_arg(&args, "amount")?;
-            let x = optional_u32_arg(&args, "x")?;
-            let y = optional_u32_arg(&args, "y")?;
-            let transformed = niri.optional_screenshot_to_logical(window_id, x, y)?;
-            niri.cua_scroll(
-                window_id,
-                direction,
-                amount,
-                transformed.logical_x,
-                transformed.logical_y,
-            )?;
-            Ok(serde_json::json!({
-                "content": [text_content(&serde_json::json!({
-                    "window_id": window_id,
-                    "scrolled": amount,
-                    "coordinate_space": "screenshot_pixels",
-                    "sent_logical": { "x": transformed.logical_x, "y": transformed.logical_y },
-                    "scale": transformed.scale
-                }).to_string())]
-            }))
-        }
-        _ => Err(anyhow!("unknown CUA tool: {name}")),
+    fn view_window_inner(&self, params: ViewWindowParams) -> Result<CallToolResult> {
+        let niri = Niri::discover()?;
+        let path = screenshot_window(
+            &niri,
+            params.window_id,
+            &capture_dir()?,
+            self.intrusive_fallback(params.intrusive_fallback),
+        )?;
+        let window = niri.window(params.window_id)?;
+        let output = ScreenshotOutput {
+            window_id: params.window_id,
+            path: path.clone(),
+            size: image_size(&path).ok(),
+            scale: niri.window_scale(&window).ok(),
+            coordinate_space: "screenshot_pixels",
+        };
+        Ok(CallToolResult::success(vec![
+            Content::text(serde_json::to_string_pretty(&output)?),
+            image_content(&path)?,
+        ]))
+    }
+
+    fn click_inner(&self, params: ClickParams) -> Result<CallToolResult> {
+        let niri = Niri::discover()?;
+        let (logical_x, logical_y, scale) =
+            niri.screenshot_to_logical(params.window_id, params.x, params.y)?;
+        niri.cua_click(params.window_id, logical_x, logical_y)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "window_id": params.window_id,
+                "clicked": { "x": params.x, "y": params.y },
+                "coordinate_space": "screenshot_pixels",
+                "sent_logical": { "x": logical_x, "y": logical_y },
+                "scale": scale
+            })
+            .to_string(),
+        )]))
+    }
+
+    fn type_text_inner(&self, params: TypeTextParams) -> Result<CallToolResult> {
+        let niri = Niri::discover()?;
+        niri.cua_type_text(params.window_id, &params.text)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "window_id": params.window_id,
+                "typed_chars": params.text.chars().count()
+            })
+            .to_string(),
+        )]))
+    }
+
+    fn scroll_inner(&self, params: ScrollParams) -> Result<CallToolResult> {
+        let niri = Niri::discover()?;
+        let direction = params.direction.into();
+        let transformed =
+            niri.optional_screenshot_to_logical(params.window_id, params.x, params.y)?;
+        niri.cua_scroll(
+            params.window_id,
+            direction,
+            params.amount,
+            transformed.logical_x,
+            transformed.logical_y,
+        )?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "window_id": params.window_id,
+                "scrolled": params.amount,
+                "coordinate_space": "screenshot_pixels",
+                "sent_logical": { "x": transformed.logical_x, "y": transformed.logical_y },
+                "scale": transformed.scale
+            })
+            .to_string(),
+        )]))
     }
 }
 
-fn mcp_result(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn mcp_error(
-    id: serde_json::Value,
-    code: i64,
-    message: impl Into<String>,
-    data: Option<serde_json::Value>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message.into(),
-            "data": data
+impl From<McpScrollDirection> for ScrollDirection {
+    fn from(direction: McpScrollDirection) -> Self {
+        match direction {
+            McpScrollDirection::Up => ScrollDirection::Up,
+            McpScrollDirection::Down => ScrollDirection::Down,
+            McpScrollDirection::Left => ScrollDirection::Left,
+            McpScrollDirection::Right => ScrollDirection::Right,
         }
-    })
+    }
 }
 
-fn text_content(text: &str) -> serde_json::Value {
-    serde_json::json!({ "type": "text", "text": text })
-}
-
-fn image_content(path: &Path) -> Result<serde_json::Value> {
+fn image_content(path: &Path) -> Result<Content> {
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    Ok(serde_json::json!({
-        "type": "image",
-        "data": base64::engine::general_purpose::STANDARD.encode(data),
-        "mimeType": "image/png"
-    }))
+    Ok(Content::image(
+        base64::engine::general_purpose::STANDARD.encode(data),
+        "image/png",
+    ))
 }
 
-fn bool_arg(args: &serde_json::Value, name: &str) -> Option<bool> {
-    args.get(name).and_then(|value| value.as_bool())
-}
-
-fn optional_u64_arg(args: &serde_json::Value, name: &str) -> Result<Option<u64>> {
-    args.get(name).map(parse_u64_arg).transpose()
-}
-
-fn required_u64_arg(args: &serde_json::Value, name: &str) -> Result<u64> {
-    optional_u64_arg(args, name)?.ok_or_else(|| anyhow!("missing required integer argument {name}"))
-}
-
-fn optional_u32_arg(args: &serde_json::Value, name: &str) -> Result<Option<u32>> {
-    args.get(name)
-        .map(parse_u64_arg)
-        .transpose()?
-        .map(|value| u32::try_from(value).context(format!("{name} exceeds u32")))
-        .transpose()
-}
-
-fn required_u32_arg(args: &serde_json::Value, name: &str) -> Result<u32> {
-    optional_u32_arg(args, name)?.ok_or_else(|| anyhow!("missing required integer argument {name}"))
-}
-
-fn parse_u64_arg(value: &serde_json::Value) -> Result<u64> {
-    if let Some(number) = value.as_u64() {
-        return Ok(number);
-    }
-    if let Some(text) = value.as_str() {
-        return text
-            .parse()
-            .with_context(|| format!("invalid integer argument {text:?}"));
-    }
-    Err(anyhow!("expected integer or integer string, got {value}"))
-}
-
-fn scroll_direction_arg(args: &serde_json::Value) -> Result<ScrollDirection> {
-    match args
-        .get("direction")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-    {
-        "up" | "Up" => Ok(ScrollDirection::Up),
-        "down" | "Down" => Ok(ScrollDirection::Down),
-        "left" | "Left" => Ok(ScrollDirection::Left),
-        "right" | "Right" => Ok(ScrollDirection::Right),
-        other => Err(anyhow!("invalid scroll direction {other:?}")),
-    }
+fn tool_error(err: anyhow::Error) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(error_chain(&err))])
 }
 
 fn describe_workspace(
