@@ -162,19 +162,13 @@ fn main() -> Result<()> {
             print_json(&ScreenshotOutput { window_id, path })?;
         }
         Commands::Click { window_id, x, y } => {
-            let point = focus_and_resolve_point(&niri, window_id, Some((x, y)))?;
-            let mut input = Input::create(&niri.focused_logical_output()?)?;
-            input.mouse_move(point.0, point.1)?;
-            input.click()?;
+            niri.cua_click(window_id, x, y)?;
             print_json(
-                &serde_json::json!({ "window_id": window_id, "clicked": { "x": x, "y": y }, "absolute": { "x": point.0, "y": point.1 } }),
+                &serde_json::json!({ "window_id": window_id, "clicked": { "x": x, "y": y } }),
             )?;
         }
         Commands::TypeText { window_id, text } => {
-            niri.focus_window(window_id)?;
-            thread::sleep(Duration::from_millis(120));
-            let mut input = Input::create(&niri.focused_logical_output()?)?;
-            input.type_text(&text)?;
+            niri.cua_type_text(window_id, &text)?;
             print_json(
                 &serde_json::json!({ "window_id": window_id, "typed_chars": text.chars().count() }),
             )?;
@@ -186,13 +180,8 @@ fn main() -> Result<()> {
             x,
             y,
         } => {
-            let point = focus_and_resolve_point(&niri, window_id, x.zip(y))?;
-            let mut input = Input::create(&niri.focused_logical_output()?)?;
-            input.mouse_move(point.0, point.1)?;
-            input.scroll(direction, amount)?;
-            print_json(
-                &serde_json::json!({ "window_id": window_id, "scrolled": amount, "absolute": { "x": point.0, "y": point.1 } }),
-            )?;
+            niri.cua_scroll(window_id, direction, amount, x, y)?;
+            print_json(&serde_json::json!({ "window_id": window_id, "scrolled": amount }))?;
         }
     }
 
@@ -300,53 +289,12 @@ fn screenshot_window(
     Ok(path)
 }
 
-fn focus_and_resolve_point(
-    niri: &Niri,
-    window_id: u64,
-    point: Option<(u32, u32)>,
-) -> Result<(u32, u32)> {
-    niri.focus_window(window_id)?;
-    thread::sleep(Duration::from_millis(160));
-
-    let window = niri.focused_window()?;
-    if window.id != window_id {
-        return Err(anyhow!(
-            "niri focused window {}, expected {window_id}",
-            window.id
-        ));
-    }
-
-    let output = niri.focused_logical_output()?;
-    let (window_x, window_y, _, _) = resolve_window_rect(&output, &window);
-    let width = window_width(&window)?;
-    let height = window_height(&window)?;
-    let (relative_x, relative_y) = point.unwrap_or((width / 2, height / 2));
-    if relative_x >= window_width(&window)? || relative_y >= window_height(&window)? {
-        return Err(anyhow!(
-            "coordinates ({relative_x}, {relative_y}) exceed focused window size {}x{}",
-            window.layout.window_size[0],
-            window.layout.window_size[1]
-        ));
-    }
-
-    let absolute_x = cmp::max(0, window_x + relative_x as i32) as u32;
-    let absolute_y = cmp::max(0, window_y + relative_y as i32) as u32;
-    Ok((absolute_x, absolute_y))
-}
-
 fn focus_and_resolve_rect(niri: &Niri, window_id: u64) -> Result<(i32, i32, u32, u32)> {
     niri.focus_window(window_id)?;
     thread::sleep(Duration::from_millis(160));
 
-    let window = niri.focused_window()?;
-    if window.id != window_id {
-        return Err(anyhow!(
-            "niri focused window {}, expected {window_id}",
-            window.id
-        ));
-    }
-
-    let output = niri.focused_logical_output()?;
+    let window = niri.window(window_id)?;
+    let output = niri.logical_output_for_window(&window)?;
     Ok(resolve_window_rect(&output, &window))
 }
 
@@ -467,22 +415,115 @@ impl Niri {
         self.msg_json(["--json", "workspaces"])
     }
 
+    fn outputs(&self) -> Result<Vec<Output>> {
+        self.msg_json(["--json", "outputs"])
+    }
+
+    fn window(&self, window_id: u64) -> Result<Window> {
+        self.windows()?
+            .into_iter()
+            .find(|window| window.id == window_id)
+            .ok_or_else(|| anyhow!("niri reports no window with id {window_id}"))
+    }
+
     fn focused_window(&self) -> Result<Window> {
         self.msg_json::<Option<Window>, _, _>(["--json", "focused-window"])?
             .ok_or_else(|| anyhow!("niri reports no focused window"))
     }
 
-    fn focused_logical_output(&self) -> Result<LogicalOutput> {
+    fn logical_output_for_window(&self, window: &Window) -> Result<LogicalOutput> {
+        let workspace_id = window
+            .workspace_id
+            .ok_or_else(|| anyhow!("window {} is not on a workspace", window.id))?;
+        let workspace = self
+            .workspaces()?
+            .into_iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "workspace {workspace_id} for window {} was not found",
+                    window.id
+                )
+            })?;
+        let output_name = workspace
+            .output
+            .ok_or_else(|| anyhow!("workspace {workspace_id} has no output"))?;
         let output = self
-            .msg_json::<Option<Output>, _, _>(["--json", "focused-output"])?
-            .ok_or_else(|| anyhow!("niri reports no focused output"))?;
+            .outputs()?
+            .into_iter()
+            .find(|output| output.name == output_name)
+            .ok_or_else(|| {
+                anyhow!("output {output_name} for workspace {workspace_id} was not found")
+            })?;
         output
             .logical
-            .ok_or_else(|| anyhow!("focused output {} has no logical mapping", output.name))
+            .ok_or_else(|| anyhow!("output {output_name} has no logical mapping"))
     }
 
     fn focus_window(&self, window_id: u64) -> Result<()> {
         self.msg(["action", "focus-window", "--id", &window_id.to_string()])
+    }
+
+    fn cua_click(&self, window_id: u64, x: u32, y: u32) -> Result<()> {
+        self.msg([
+            "action",
+            "cua-click",
+            "--id",
+            &window_id.to_string(),
+            "--x",
+            &x.to_string(),
+            "--y",
+            &y.to_string(),
+        ])
+    }
+
+    fn cua_type_text(&self, window_id: u64, text: &str) -> Result<()> {
+        self.msg([
+            "action",
+            "cua-type-text",
+            "--id",
+            &window_id.to_string(),
+            "--text",
+            text,
+        ])
+    }
+
+    fn cua_scroll(
+        &self,
+        window_id: u64,
+        direction: ScrollDirection,
+        amount: u32,
+        x: Option<u32>,
+        y: Option<u32>,
+    ) -> Result<()> {
+        let amount = i32::try_from(amount).context("scroll amount exceeds i32")?;
+        let (scroll_x, scroll_y) = match direction {
+            ScrollDirection::Up => (0, -amount),
+            ScrollDirection::Down => (0, amount),
+            ScrollDirection::Left => (-amount, 0),
+            ScrollDirection::Right => (amount, 0),
+        };
+
+        let mut args = vec![
+            "action".to_string(),
+            "cua-scroll".to_string(),
+            "--id".to_string(),
+            window_id.to_string(),
+            "--scroll-x".to_string(),
+            scroll_x.to_string(),
+            "--scroll-y".to_string(),
+            scroll_y.to_string(),
+        ];
+        if let Some(x) = x {
+            args.push("--x".to_string());
+            args.push(x.to_string());
+        }
+        if let Some(y) = y {
+            args.push("--y".to_string());
+            args.push(y.to_string());
+        }
+
+        self.msg(args)
     }
 
     fn screenshot_window(&self, window_id: u64, path: &Path, notify: bool) -> Result<()> {
@@ -686,188 +727,6 @@ fn find_wayland_display(dir: &Path) -> Option<String> {
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| name.starts_with("wayland-") && !name.ends_with(".lock"))
         .max()
-}
-
-struct Input {
-    mouse: uinput::Device,
-    keyboard: uinput::Device,
-}
-
-impl Input {
-    fn create(output: &LogicalOutput) -> Result<Self> {
-        let mouse = uinput::default()?
-            .name("cua-wayland-mouse")?
-            .event(uinput::event::controller::Controller::Mouse(
-                uinput::event::controller::Mouse::Left,
-            ))?
-            .event(uinput::event::relative::Relative::Wheel(
-                uinput::event::relative::Wheel::Vertical,
-            ))?
-            .event(uinput::event::relative::Relative::Wheel(
-                uinput::event::relative::Wheel::Horizontal,
-            ))?
-            .event(uinput::event::absolute::Absolute::Position(
-                uinput::event::absolute::Position::X,
-            ))?
-            .min(0)
-            .max(output.width as i32)
-            .fuzz(0)
-            .flat(0)
-            .event(uinput::event::absolute::Absolute::Position(
-                uinput::event::absolute::Position::Y,
-            ))?
-            .min(0)
-            .max(output.height as i32)
-            .fuzz(0)
-            .flat(0)
-            .create()
-            .context("create uinput mouse; ensure this user can write /dev/uinput")?;
-
-        let mut builder = uinput::default()?.name("cua-wayland-keyboard")?;
-        for key in uinput::event::keyboard::Key::iter_variants() {
-            builder = builder.event(key)?;
-        }
-        let keyboard = builder
-            .create()
-            .context("create uinput keyboard; ensure this user can write /dev/uinput")?;
-
-        thread::sleep(Duration::from_millis(350));
-        Ok(Self { mouse, keyboard })
-    }
-
-    fn mouse_move(&mut self, x: u32, y: u32) -> Result<()> {
-        self.mouse.send(
-            uinput::event::absolute::Absolute::Position(uinput::event::absolute::Position::X),
-            x as i32,
-        )?;
-        self.mouse.send(
-            uinput::event::absolute::Absolute::Position(uinput::event::absolute::Position::Y),
-            y as i32,
-        )?;
-        self.mouse.synchronize()?;
-        thread::sleep(Duration::from_millis(80));
-        Ok(())
-    }
-
-    fn click(&mut self) -> Result<()> {
-        let button =
-            uinput::event::controller::Controller::Mouse(uinput::event::controller::Mouse::Left);
-        self.mouse.send(button, 1)?;
-        self.mouse.synchronize()?;
-        thread::sleep(Duration::from_millis(70));
-        self.mouse.send(button, 0)?;
-        self.mouse.synchronize()?;
-        Ok(())
-    }
-
-    fn scroll(&mut self, direction: ScrollDirection, amount: u32) -> Result<()> {
-        let (wheel, sign) = match direction {
-            ScrollDirection::Up => (uinput::event::relative::Wheel::Vertical, 1),
-            ScrollDirection::Down => (uinput::event::relative::Wheel::Vertical, -1),
-            ScrollDirection::Left => (uinput::event::relative::Wheel::Horizontal, -1),
-            ScrollDirection::Right => (uinput::event::relative::Wheel::Horizontal, 1),
-        };
-        self.mouse.send(
-            uinput::event::relative::Relative::Wheel(wheel),
-            amount as i32 * sign,
-        )?;
-        self.mouse.synchronize()?;
-        Ok(())
-    }
-
-    fn type_text(&mut self, text: &str) -> Result<()> {
-        for c in text.chars() {
-            let keys = char_to_keys(c);
-            if keys.is_empty() {
-                return Err(anyhow!("unsupported character for uinput typing: {c:?}"));
-            }
-            for key in keys.iter().take(keys.len().saturating_sub(1)) {
-                self.key(*key, 1)?;
-            }
-            let key = *keys.last().expect("non-empty keys");
-            self.key(key, 1)?;
-            thread::sleep(Duration::from_millis(25));
-            self.key(key, 0)?;
-            for key in keys.iter().take(keys.len().saturating_sub(1)).rev() {
-                self.key(*key, 0)?;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        Ok(())
-    }
-
-    fn key(&mut self, key: uinput::event::keyboard::Key, value: i32) -> Result<()> {
-        self.keyboard.send(key, value)?;
-        self.keyboard.synchronize()?;
-        Ok(())
-    }
-}
-
-fn char_to_keys(c: char) -> Vec<uinput::event::keyboard::Key> {
-    use uinput::event::keyboard::Key;
-    let mut keys = Vec::new();
-    if c.is_ascii_uppercase() {
-        keys.push(Key::LeftShift);
-    }
-    match c.to_ascii_lowercase() {
-        'a' => keys.push(Key::A),
-        'b' => keys.push(Key::B),
-        'c' => keys.push(Key::C),
-        'd' => keys.push(Key::D),
-        'e' => keys.push(Key::E),
-        'f' => keys.push(Key::F),
-        'g' => keys.push(Key::G),
-        'h' => keys.push(Key::H),
-        'i' => keys.push(Key::I),
-        'j' => keys.push(Key::J),
-        'k' => keys.push(Key::K),
-        'l' => keys.push(Key::L),
-        'm' => keys.push(Key::M),
-        'n' => keys.push(Key::N),
-        'o' => keys.push(Key::O),
-        'p' => keys.push(Key::P),
-        'q' => keys.push(Key::Q),
-        'r' => keys.push(Key::R),
-        's' => keys.push(Key::S),
-        't' => keys.push(Key::T),
-        'u' => keys.push(Key::U),
-        'v' => keys.push(Key::V),
-        'w' => keys.push(Key::W),
-        'x' => keys.push(Key::X),
-        'y' => keys.push(Key::Y),
-        'z' => keys.push(Key::Z),
-        '0' => keys.push(Key::_0),
-        '1' => keys.push(Key::_1),
-        '2' => keys.push(Key::_2),
-        '3' => keys.push(Key::_3),
-        '4' => keys.push(Key::_4),
-        '5' => keys.push(Key::_5),
-        '6' => keys.push(Key::_6),
-        '7' => keys.push(Key::_7),
-        '8' => keys.push(Key::_8),
-        '9' => keys.push(Key::_9),
-        ' ' => keys.push(Key::Space),
-        '\n' => keys.push(Key::Enter),
-        '.' => keys.push(Key::Dot),
-        ',' => keys.push(Key::Comma),
-        '-' => keys.push(Key::Minus),
-        '_' => {
-            keys.push(Key::LeftShift);
-            keys.push(Key::Minus);
-        }
-        '/' => keys.push(Key::Slash),
-        '?' => {
-            keys.push(Key::LeftShift);
-            keys.push(Key::Slash);
-        }
-        ':' => {
-            keys.push(Key::LeftShift);
-            keys.push(Key::SemiColon);
-        }
-        ';' => keys.push(Key::SemiColon),
-        _ => {}
-    }
-    keys
 }
 
 #[cfg(test)]

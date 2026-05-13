@@ -65,6 +65,10 @@ Item {
     }
   }
 
+  function start() {
+    ensureRunning();
+  }
+
   function writeMessage(message) {
     ensureRunning();
     codexAgent.write(JSON.stringify(message) + "\n");
@@ -136,4 +140,6 @@ Item {
       root.appendEvent("system", "Codex agent stopped", "exit " + exitCode);
     }
   }
+
+  Component.onCompleted: root.start()
 }

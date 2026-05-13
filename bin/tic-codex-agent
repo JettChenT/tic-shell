@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,13 @@ const defaultWorkspaceRoot = path.resolve(
   process.env.TIC_CODEX_WORKDIR_ROOT || path.join(runtimeDir, "tic-shell", "codex-workspaces")
 );
 const adapterCommand = process.env.TIC_CODEX_ACP_COMMAND || "";
+const adapterPackage = "@zed-industries/codex-acp@0.13.0";
+const dataRoot = path.resolve(
+  process.env.TIC_SHELL_DATA_ROOT
+  || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "tic-shell")
+);
+const managedAdapterRoot = path.join(dataRoot, "codex-acp");
+const adapterDebugLog = path.join(dataRoot, "codex-acp.log");
 
 function emit(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -869,23 +876,95 @@ return {
 };
 }
 
-function adapterShellCommand() {
-  if (adapterCommand.trim().length > 0) {
-    return `exec ${adapterCommand}`;
+function appendAdapterLog(line) {
+  if (!line) {
+    return;
+  }
+  try {
+    mkdirSync(dataRoot, { recursive: true });
+    appendFileSync(adapterDebugLog, `${new Date().toISOString()} ${line}\n`, "utf8");
+  } catch {
+    // Keep ACP startup independent from debug logging.
+  }
+}
+
+function managedAdapterBin() {
+  const suffix = process.platform === "win32" ? ".cmd" : "";
+  return path.join(managedAdapterRoot, "node_modules", ".bin", `codex-acp${suffix}`);
+}
+
+function ensureManagedAdapter() {
+  const bin = managedAdapterBin();
+  if (existsSync(bin)) {
+    return bin;
   }
 
-  return [
-    "if command -v codex-acp >/dev/null 2>&1; then",
-    "  exec codex-acp;",
-    "else",
-    "  exec bunx --bun @zed-industries/codex-acp@0.13.0;",
-    "fi",
-  ].join(" ");
+  mkdirSync(managedAdapterRoot, { recursive: true });
+  const result = spawnSync("bun", [
+    "install",
+    "--cwd",
+    managedAdapterRoot,
+    "--silent",
+    "--no-progress",
+    "--production",
+    "--exact",
+    adapterPackage,
+  ], {
+    encoding: "utf8",
+    env: process.env,
+  });
+
+  if (result.stdout?.trim()) {
+    appendAdapterLog(result.stdout.trim());
+  }
+  if (result.stderr?.trim()) {
+    appendAdapterLog(result.stderr.trim());
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`Installing ${adapterPackage} failed with exit ${result.status}`);
+  }
+  if (!existsSync(bin)) {
+    throw new Error(`Managed Codex ACP binary not found at ${bin}`);
+  }
+
+  return bin;
+}
+
+function adapterCommandSpec() {
+  if (adapterCommand.trim().length > 0) {
+    return {
+      command: "bash",
+      args: ["-c", `exec ${adapterCommand}`],
+    };
+  }
+
+  const bin = ensureManagedAdapter();
+  return {
+    command: bin,
+    args: [],
+  };
 }
 
 function main() {
 mkdirSync(defaultWorkspaceRoot, { recursive: true });
-const child = spawn("bash", ["-c", adapterShellCommand()], {
+let commandSpec;
+try {
+  commandSpec = adapterCommandSpec();
+} catch (err) {
+  emit({ type: "status", status: "error" });
+  emit({
+    type: "event",
+    kind: "error",
+    title: "Failed to prepare Codex ACP",
+    body: err?.message || String(err),
+  });
+  return;
+}
+
+const child = spawn(commandSpec.command, commandSpec.args, {
   cwd: defaultWorkspaceRoot,
   env: {
     ...process.env,
@@ -898,10 +977,45 @@ const child = spawn("bash", ["-c", adapterShellCommand()], {
       process.env.PATH || "",
     ].filter(Boolean).join(":"),
   },
+  detached: process.platform !== "win32",
   stdio: ["pipe", "pipe", "pipe"],
 });
 
 const client = createClient({ child });
+let shuttingDown = false;
+
+function terminateAdapter(signal = "SIGTERM") {
+  if (child.killed) {
+    return;
+  }
+
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch (err) {
+    appendAdapterLog(`failed to terminate adapter: ${err?.message || String(err)}`);
+  }
+}
+
+function shutdown(signal) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  terminateAdapter(signal === "SIGINT" ? "SIGINT" : "SIGTERM");
+  setTimeout(() => process.exit(0), 750).unref?.();
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => shutdown(signal));
+}
+
+process.on("exit", () => {
+  terminateAdapter("SIGTERM");
+});
 
 createInterface({ input: child.stdout }).on("line", line => {
   const trimmed = line.trim();
@@ -918,7 +1032,7 @@ createInterface({ input: child.stdout }).on("line", line => {
 createInterface({ input: child.stderr }).on("line", line => {
   const trimmed = line.trim();
   if (trimmed) {
-    client.event("stderr", "codex-acp", trimmed);
+    appendAdapterLog(trimmed);
   }
 });
 
@@ -932,6 +1046,9 @@ child.on("error", err => {
 
 child.on("exit", (code, signal) => {
   client.handleExit(code, signal);
+  if (shuttingDown) {
+    process.exit(0);
+  }
 });
 
 client.initialize();
