@@ -96,11 +96,20 @@ Item {
     Flickable {
       id: agentTranscript
 
+      function scrollToBottom() {
+        Qt.callLater(function() {
+          contentY = Math.max(0, contentHeight - height);
+        });
+      }
+
       width: parent.width
       height: parent.height - y - agentInputBox.height - 10
       clip: true
       contentWidth: width
       contentHeight: agentEventColumn.height
+      onContentHeightChanged: scrollToBottom()
+      onHeightChanged: scrollToBottom()
+      onVisibleChanged: if (visible) scrollToBottom()
 
       Column {
         id: agentEventColumn

@@ -20,7 +20,7 @@ Rectangle {
   }
 
   width: parent ? parent.width : 0
-  height: 76
+  height: Math.max(76, Math.min(136, agentPromptInput.contentHeight + 57))
   z: 10
   radius: 16
   color: root.shell.capsuleColor
@@ -46,18 +46,31 @@ Rectangle {
     anchors.margins: 9
     spacing: 7
 
-    TextInput {
+    TextEdit {
       id: agentPromptInput
 
       width: parent.width
-      height: 26
+      height: Math.min(86, Math.max(26, contentHeight))
       color: root.shell.mOnSurface
       selectedTextColor: root.shell.mOnPrimary
       selectionColor: root.shell.mPrimary
       font.pixelSize: 13
       clip: true
       selectByMouse: true
-      verticalAlignment: TextInput.AlignVCenter
+      verticalAlignment: lineCount > 1 ? TextEdit.AlignTop : TextEdit.AlignVCenter
+      wrapMode: TextEdit.WrapAtWordBoundaryOrAnywhere
+
+      function submitPrompt(event) {
+        if (event.modifiers & Qt.ShiftModifier) {
+          insert(cursorPosition, "\n");
+        } else if (slashCommandPopup.visible && root.shell.selectedSlashCommand(text) !== null && text.indexOf(" ") === -1) {
+          root.completeCommand(root.shell.selectedSlashCommand(text));
+        } else {
+          root.promptAccepted(text);
+          text = "";
+        }
+        event.accepted = true;
+      }
 
       onTextChanged: {
         if (!text.startsWith("/")) {
@@ -66,15 +79,6 @@ Rectangle {
           root.shell.slashCommandIndex = Math.max(0, root.commands.length - 1);
         }
       }
-      onAccepted: {
-        if (slashCommandPopup.visible && root.shell.selectedSlashCommand(text) !== null && text.indexOf(" ") === -1) {
-          root.completeCommand(root.shell.selectedSlashCommand(text));
-        } else {
-          root.promptAccepted(text);
-          text = "";
-        }
-      }
-
       Keys.onDownPressed: function(event) {
         if (root.commands.length > 0) {
           root.shell.slashCommandIndex = Math.min(root.commands.length - 1, root.shell.slashCommandIndex + 1);
@@ -104,6 +108,14 @@ Rectangle {
           root.completeCommand(root.shell.selectedSlashCommand(text));
           event.accepted = true;
         }
+      }
+
+      Keys.onReturnPressed: function(event) {
+        submitPrompt(event);
+      }
+
+      Keys.onEnterPressed: function(event) {
+        submitPrompt(event);
       }
 
       Text {
