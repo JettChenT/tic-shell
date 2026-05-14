@@ -27,7 +27,27 @@ function emit(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function createClient({ child, emitMessage = emit, workspaceRoot = defaultWorkspaceRoot }) {
+function destroyVirtualCursorDefault(cursorId) {
+  if (!cursorId) {
+    return;
+  }
+  const niri = resolveCommand("niri");
+  const result = spawnSync(niri, ["msg", "destroy-virtual-cursor", "--cursor-id", cursorId], {
+    encoding: "utf8",
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    appendAdapterLog(`destroy virtual cursor ${cursorId} failed: ${result.stderr || result.stdout || result.status}`);
+  }
+}
+
+function createClient({
+  child,
+  emitMessage = emit,
+  workspaceRoot = defaultWorkspaceRoot,
+  destroyVirtualCursor = destroyVirtualCursorDefault,
+}) {
 let nextId = 1;
 let nextEntryId = 1;
 let initialized = false;
@@ -60,6 +80,7 @@ function createWorkspace(key = activeWorkspaceKey, title = activeWorkspaceTitle)
     pendingPrompts: [],
     entries: [],
     tools: new Map(),
+    cuaCursorIds: new Set(),
     availableCommands: [],
   };
 }
@@ -334,6 +355,9 @@ function commandList(state = workspace()) {
 
 function setActiveWorkspace(key, title = key) {
   const nextKey = String(key || "workspace:default");
+  if (nextKey !== activeWorkspaceKey) {
+    cleanupCuaCursors(workspace(activeWorkspaceKey), "workspace-deactivate");
+  }
   const state = workspace(nextKey);
   updateWorkspaceMetadata(state, nextKey, title || state.title || nextKey);
   activeWorkspaceKey = nextKey;
@@ -363,10 +387,15 @@ function initialize() {
 }
 
 function closeSession(state) {
+  cleanupCuaCursors(state, "session-close");
   if (state.sessionId) {
     notify("session/close", { sessionId: state.sessionId });
     sessionsById.delete(state.sessionId);
   }
+}
+
+function deactivateWorkspace(state = workspace()) {
+  cleanupCuaCursors(state, "workspace-deactivate");
 }
 
 function resetWorkspaceSession(state = workspace(), createImmediately = initialized) {
@@ -495,9 +524,10 @@ The workspace \`Key\` is tic-shell UI metadata, not a CUA argument. Never pass v
 Useful MCP tools:
 - \`view-window\` captures a single window and returns the PNG image directly. Prefer this when you already know the target window id.
 - \`describe-workspace\` returns window metadata and can include an efficient composite workspace screenshot. Use it to discover window ids, and set \`include_screenshots=true\` when a visual workspace overview would help.
-- \`click\` clicks inside a window at window-relative screenshot/image pixel coordinates.
+- \`click\` clicks inside a window at window-relative screenshot/image pixel coordinates. It returns a \`session_id\`; pass the same \`session_id\` on later mouse calls for the same task so the painted virtual cursor is reused.
 - \`type-text\` types into a window.
-- \`scroll\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels.
+- \`scroll\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels. Reuse the same \`session_id\` from prior mouse calls when continuing the same task.
+- \`close-session\` closes a mouse session and destroys its painted virtual cursor.
 
 Do not call \`describe-workspace\` as a reflex before every action. If a recent tool result already identified the window, call \`view-window\` directly to inspect it; otherwise \`include_screenshots=true\` is a reasonable way to orient visually.
 
@@ -708,7 +738,7 @@ function toolNameFrom(update) {
   }
 
   const title = String(update.title || update.fields?.title || "").toLowerCase();
-  for (const name of ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll"]) {
+  for (const name of ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll", "close-session"]) {
     if (title.includes(name)) {
       return name;
     }
@@ -719,7 +749,7 @@ function toolNameFrom(update) {
 function toolMetadata(update) {
   const toolName = toolNameFrom(update).replace(/_/g, "-").toLowerCase();
   const title = String(update.title || update.fields?.title || "").toLowerCase();
-  const isCua = ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll"].includes(toolName)
+  const isCua = ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll", "close-session"].includes(toolName)
     || title.includes("describe-workspace")
     || title.includes("view-window")
     || title.includes("cua");
@@ -756,11 +786,80 @@ function contentFromTool(update) {
   return parts.filter(Boolean).join("\n");
 }
 
+function parseToolJson(update) {
+  const text = textFromContent(update.content || update.fields?.content || update.rawOutput || update.fields?.rawOutput || update.fields?.raw_output).trim();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) {
+      return null;
+    }
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function cursorIdFromToolPayload(payload) {
+  const cursorId = payload?.virtual_cursor || payload?.virtualCursor || payload?.cursor_id || payload?.cursorId;
+  if (typeof cursorId === "string" && cursorId.trim()) {
+    return cursorId.trim();
+  }
+  const sessionId = payload?.session_id || payload?.sessionId;
+  if (typeof sessionId === "string" && /^[A-Za-z0-9_-]+$/.test(sessionId.trim())) {
+    return `tic-cua-mcp-${sessionId.trim()}`;
+  }
+  return "";
+}
+
+function trackCuaCursorFromTool(state, update) {
+  const toolName = toolNameFrom(update).replace(/_/g, "-").toLowerCase();
+  if (!["click", "scroll", "close-session"].includes(toolName)) {
+    return;
+  }
+
+  const payload = parseToolJson(update);
+  const cursorId = cursorIdFromToolPayload(payload);
+  if (!cursorId) {
+    return;
+  }
+
+  if (toolName === "close-session") {
+    state.cuaCursorIds.delete(cursorId);
+  } else {
+    state.cuaCursorIds.add(cursorId);
+  }
+}
+
+function cleanupCuaCursors(state, reason = "deactivate") {
+  if (!state?.cuaCursorIds || state.cuaCursorIds.size === 0) {
+    return;
+  }
+
+  const cursorIds = Array.from(state.cuaCursorIds);
+  state.cuaCursorIds.clear();
+  for (const cursorId of cursorIds) {
+    try {
+      destroyVirtualCursor(cursorId);
+    } catch (err) {
+      appendEntry(state, "error", "CUA cleanup", `${reason}: ${err?.message || String(err)}`);
+    }
+  }
+}
+
 function handleToolCall(state, update) {
   clearThinking(state);
   const id = update.toolCallId || update.tool_call_id || update.id;
   if (!id) {
     appendEntry(state, "tool", update.title || "Tool call", contentFromTool(update));
+    trackCuaCursorFromTool(state, update);
     return;
   }
 
@@ -773,6 +872,7 @@ function handleToolCall(state, update) {
   const title = next.title || next.fields?.title || id || "Tool call";
   state.tools.set(id, next);
   replaceEntry(state, `tool:${id}`, "tool", title, contentFromTool(next), toolMetadata(next));
+  trackCuaCursorFromTool(state, next);
 }
 
 function handleUserChunk(state, update) {
@@ -955,6 +1055,8 @@ function handleClientInput(line) {
       setActiveWorkspace(message.workspaceKey, message.workspaceTitle);
     } else if (message.type === "clear" || message.type === "new") {
       resetWorkspaceSession(workspace(message.workspaceKey || activeWorkspaceKey));
+    } else if (message.type === "deactivate") {
+      deactivateWorkspace(workspace(message.workspaceKey || activeWorkspaceKey));
     } else if (message.type === "cancel") {
       const state = workspace(message.workspaceKey || activeWorkspaceKey);
       if (state.sessionId) {
@@ -970,6 +1072,7 @@ function handleClientInput(line) {
 
 function handleExit(code, signal) {
   for (const state of workspaces.values()) {
+    cleanupCuaCursors(state, "agent-exit");
     state.sessionReady = false;
     state.promptBusy = false;
     clearThinking(state);
@@ -990,6 +1093,7 @@ return {
   handleSpawnError,
   event,
   setActiveWorkspace,
+  deactivateWorkspace,
   queuePrompt,
   entries: workspace().entries,
   workspaces,

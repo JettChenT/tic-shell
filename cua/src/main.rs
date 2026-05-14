@@ -19,6 +19,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const VIRTUAL_CURSOR_ID_PREFIX: &str = "tic-cua-mcp";
+const VIRTUAL_CURSOR_THEME: &str = "Tiri-CUA";
+const VIRTUAL_CURSOR_ICON: &str = "left_ptr";
+const VIRTUAL_CURSOR_SIZE: u16 = 32;
+const VIRTUAL_CURSOR_MOVE_MS: u32 = 120;
+
 #[derive(Parser, Debug)]
 #[command(
     version,
@@ -97,6 +103,8 @@ struct ClickParams {
     x: u32,
     /// Window-relative Y coordinate in screenshot/image pixels.
     y: u32,
+    /// Optional CUA session id. Reuse the returned session_id for later mouse calls in the same task so the same virtual cursor is moved and reused.
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -119,6 +127,14 @@ struct ScrollParams {
     x: Option<u32>,
     /// Optional window-relative Y coordinate in screenshot/image pixels.
     y: Option<u32>,
+    /// Optional CUA session id. Reuse the returned session_id for later mouse calls in the same task so the same virtual cursor is moved and reused.
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CloseSessionParams {
+    /// The CUA session id returned by click or scroll.
+    session_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -224,10 +240,45 @@ struct EnvDefaults {
     wayland_display: Option<String>,
 }
 
-struct OptionalLogicalCoords {
-    logical_x: Option<u32>,
-    logical_y: Option<u32>,
+struct ScrollTarget {
+    logical_x: u32,
+    logical_y: u32,
     scale: Option<f64>,
+}
+
+struct CuaSession {
+    session_id: String,
+    cursor_id: String,
+    generated: bool,
+}
+
+impl CuaSession {
+    fn new(session_id: Option<String>) -> Result<Self> {
+        let (session_id, generated) = match session_id {
+            Some(session_id) => (normalize_session_id(session_id)?, false),
+            None => (generate_session_id()?, true),
+        };
+        let cursor_id = format!("{VIRTUAL_CURSOR_ID_PREFIX}-{session_id}");
+        Ok(Self {
+            session_id,
+            cursor_id,
+            generated,
+        })
+    }
+
+    fn reuse_hint(&self) -> String {
+        if self.generated {
+            format!(
+                "Pass session_id {:?} on future click/scroll calls for this task, then call close-session with it when finished.",
+                self.session_id
+            )
+        } else {
+            format!(
+                "Continue passing session_id {:?} for this task and call close-session with it when finished.",
+                self.session_id
+            )
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -264,12 +315,17 @@ fn main() -> Result<()> {
         }
         Commands::Click { window_id, x, y } => {
             let (logical_x, logical_y, scale) = niri.screenshot_to_logical(window_id, x, y)?;
-            niri.cua_click(window_id, logical_x, logical_y)?;
+            let session = CuaSession::new(None)?;
+            niri.virtual_cursor_click(&session.cursor_id, window_id, logical_x, logical_y)?;
             print_json(&serde_json::json!({
                 "window_id": window_id,
                 "clicked": { "x": x, "y": y },
                 "coordinate_space": "screenshot_pixels",
                 "sent_logical": { "x": logical_x, "y": logical_y },
+                "session_id": session.session_id,
+                "session_id_generated": session.generated,
+                "session_reuse_hint": session.reuse_hint(),
+                "virtual_cursor": session.cursor_id,
                 "scale": scale
             }))?;
         }
@@ -286,8 +342,10 @@ fn main() -> Result<()> {
             x,
             y,
         } => {
-            let transformed = niri.optional_screenshot_to_logical(window_id, x, y)?;
-            niri.cua_scroll(
+            let transformed = niri.scroll_target(window_id, x, y)?;
+            let session = CuaSession::new(None)?;
+            niri.virtual_cursor_scroll(
+                &session.cursor_id,
                 window_id,
                 direction,
                 amount,
@@ -299,6 +357,10 @@ fn main() -> Result<()> {
                 "scrolled": amount,
                 "coordinate_space": "screenshot_pixels",
                 "sent_logical": { "x": transformed.logical_x, "y": transformed.logical_y },
+                "session_id": session.session_id,
+                "session_id_generated": session.generated,
+                "session_reuse_hint": session.reuse_hint(),
+                "virtual_cursor": session.cursor_id,
                 "scale": transformed.scale
             }))?;
         }
@@ -367,6 +429,14 @@ impl CuaMcpServer {
     fn scroll(&self, Parameters(params): Parameters<ScrollParams>) -> CallToolResult {
         self.scroll_inner(params).unwrap_or_else(tool_error)
     }
+
+    #[tool(
+        name = "close-session",
+        description = "Close a CUA mouse session and destroy its associated virtual cursor."
+    )]
+    fn close_session(&self, Parameters(params): Parameters<CloseSessionParams>) -> CallToolResult {
+        self.close_session_inner(params).unwrap_or_else(tool_error)
+    }
 }
 
 #[tool_handler(name = "tic-cua", version = "0.1.0")]
@@ -418,13 +488,18 @@ impl CuaMcpServer {
         let niri = Niri::discover()?;
         let (logical_x, logical_y, scale) =
             niri.screenshot_to_logical(params.window_id, params.x, params.y)?;
-        niri.cua_click(params.window_id, logical_x, logical_y)?;
+        let session = CuaSession::new(params.session_id)?;
+        niri.virtual_cursor_click(&session.cursor_id, params.window_id, logical_x, logical_y)?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
                 "window_id": params.window_id,
                 "clicked": { "x": params.x, "y": params.y },
                 "coordinate_space": "screenshot_pixels",
                 "sent_logical": { "x": logical_x, "y": logical_y },
+                "session_id": session.session_id,
+                "session_id_generated": session.generated,
+                "session_reuse_hint": session.reuse_hint(),
+                "virtual_cursor": session.cursor_id,
                 "scale": scale
             })
             .to_string(),
@@ -446,9 +521,10 @@ impl CuaMcpServer {
     fn scroll_inner(&self, params: ScrollParams) -> Result<CallToolResult> {
         let niri = Niri::discover()?;
         let direction = params.direction.into();
-        let transformed =
-            niri.optional_screenshot_to_logical(params.window_id, params.x, params.y)?;
-        niri.cua_scroll(
+        let transformed = niri.scroll_target(params.window_id, params.x, params.y)?;
+        let session = CuaSession::new(params.session_id)?;
+        niri.virtual_cursor_scroll(
+            &session.cursor_id,
             params.window_id,
             direction,
             params.amount,
@@ -461,7 +537,25 @@ impl CuaMcpServer {
                 "scrolled": params.amount,
                 "coordinate_space": "screenshot_pixels",
                 "sent_logical": { "x": transformed.logical_x, "y": transformed.logical_y },
+                "session_id": session.session_id,
+                "session_id_generated": session.generated,
+                "session_reuse_hint": session.reuse_hint(),
+                "virtual_cursor": session.cursor_id,
                 "scale": transformed.scale
+            })
+            .to_string(),
+        )]))
+    }
+
+    fn close_session_inner(&self, params: CloseSessionParams) -> Result<CallToolResult> {
+        let session = CuaSession::new(Some(params.session_id))?;
+        let niri = Niri::discover()?;
+        niri.destroy_virtual_cursor(&session.cursor_id)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "session_id": session.session_id,
+                "virtual_cursor": session.cursor_id,
+                "closed": true
             })
             .to_string(),
         )]))
@@ -793,30 +887,31 @@ impl Niri {
         ))
     }
 
-    fn optional_screenshot_to_logical(
+    fn scroll_target(
         &self,
         window_id: u64,
         x: Option<u32>,
         y: Option<u32>,
-    ) -> Result<OptionalLogicalCoords> {
-        if x.is_none() && y.is_none() {
-            return Ok(OptionalLogicalCoords {
-                logical_x: None,
-                logical_y: None,
-                scale: None,
-            });
-        }
-
+    ) -> Result<ScrollTarget> {
         let window = self.window(window_id)?;
         let scale = self.window_scale(&window)?;
-        Ok(OptionalLogicalCoords {
+        let center_x = (f64::from(window.layout.window_size[0]) / 2.0).max(0.0);
+        let center_y = (f64::from(window.layout.window_size[1]) / 2.0).max(0.0);
+
+        Ok(ScrollTarget {
             logical_x: x
                 .map(|coord| screenshot_coord_to_logical(coord, scale))
-                .transpose()?,
+                .transpose()?
+                .unwrap_or_else(|| center_x.round() as u32),
             logical_y: y
                 .map(|coord| screenshot_coord_to_logical(coord, scale))
-                .transpose()?,
-            scale: Some(scale),
+                .transpose()?
+                .unwrap_or_else(|| center_y.round() as u32),
+            scale: if x.is_some() || y.is_some() {
+                Some(scale)
+            } else {
+                None
+            },
         })
     }
 
@@ -824,17 +919,97 @@ impl Niri {
         self.msg(["action", "focus-window", "--id", &window_id.to_string()])
     }
 
-    fn cua_click(&self, window_id: u64, x: u32, y: u32) -> Result<()> {
+    fn ensure_virtual_cursor(&self, cursor_id: &str, window_id: u64, x: u32, y: u32) -> Result<()> {
+        let x = x.to_string();
+        let y = y.to_string();
+        let window_id = window_id.to_string();
+
+        let update = self.msg([
+            "update-virtual-cursor",
+            "--cursor-id",
+            cursor_id,
+            "--window-id",
+            &window_id,
+            "--x",
+            &x,
+            "--y",
+            &y,
+            "--cursor-theme",
+            VIRTUAL_CURSOR_THEME,
+            "--cursor-icon",
+            VIRTUAL_CURSOR_ICON,
+            "--size",
+            &VIRTUAL_CURSOR_SIZE.to_string(),
+            "--duration-ms",
+            &VIRTUAL_CURSOR_MOVE_MS.to_string(),
+            "--visible",
+            "true",
+            "--z-index",
+            "100",
+        ]);
+        if update.is_ok() {
+            return Ok(());
+        }
+
+        self.msg([
+            "create-virtual-cursor",
+            "--cursor-id",
+            cursor_id,
+            "--window-id",
+            &window_id,
+            "--x",
+            &x,
+            "--y",
+            &y,
+            "--cursor-theme",
+            VIRTUAL_CURSOR_THEME,
+            "--cursor-icon",
+            VIRTUAL_CURSOR_ICON,
+            "--size",
+            &VIRTUAL_CURSOR_SIZE.to_string(),
+            "--duration-ms",
+            &VIRTUAL_CURSOR_MOVE_MS.to_string(),
+            "--replace-existing",
+        ])
+    }
+
+    fn virtual_cursor_click(&self, cursor_id: &str, window_id: u64, x: u32, y: u32) -> Result<()> {
+        self.ensure_virtual_cursor(cursor_id, window_id, x, y)?;
+        self.msg(["action", "virtual-cursor-click", "--cursor-id", cursor_id])
+    }
+
+    fn virtual_cursor_scroll(
+        &self,
+        cursor_id: &str,
+        window_id: u64,
+        direction: ScrollDirection,
+        amount: u32,
+        x: u32,
+        y: u32,
+    ) -> Result<()> {
+        let amount = i32::try_from(amount).context("scroll amount exceeds i32")?;
+        let (scroll_x, scroll_y) = match direction {
+            ScrollDirection::Up => (0, -amount),
+            ScrollDirection::Down => (0, amount),
+            ScrollDirection::Left => (-amount, 0),
+            ScrollDirection::Right => (amount, 0),
+        };
+
+        self.ensure_virtual_cursor(cursor_id, window_id, x, y)?;
         self.msg([
             "action",
-            "cua-click",
-            "--id",
-            &window_id.to_string(),
-            "--x",
-            &x.to_string(),
-            "--y",
-            &y.to_string(),
+            "virtual-cursor-scroll",
+            "--cursor-id",
+            cursor_id,
+            "--scroll-x",
+            &scroll_x.to_string(),
+            "--scroll-y",
+            &scroll_y.to_string(),
         ])
+    }
+
+    fn destroy_virtual_cursor(&self, cursor_id: &str) -> Result<()> {
+        self.msg(["destroy-virtual-cursor", "--cursor-id", cursor_id])
     }
 
     fn cua_type_text(&self, window_id: u64, text: &str) -> Result<()> {
@@ -846,44 +1021,6 @@ impl Niri {
             "--text",
             text,
         ])
-    }
-
-    fn cua_scroll(
-        &self,
-        window_id: u64,
-        direction: ScrollDirection,
-        amount: u32,
-        x: Option<u32>,
-        y: Option<u32>,
-    ) -> Result<()> {
-        let amount = i32::try_from(amount).context("scroll amount exceeds i32")?;
-        let (scroll_x, scroll_y) = match direction {
-            ScrollDirection::Up => (0, -amount),
-            ScrollDirection::Down => (0, amount),
-            ScrollDirection::Left => (-amount, 0),
-            ScrollDirection::Right => (amount, 0),
-        };
-
-        let mut args = vec![
-            "action".to_string(),
-            "cua-scroll".to_string(),
-            "--id".to_string(),
-            window_id.to_string(),
-            "--scroll-x".to_string(),
-            scroll_x.to_string(),
-            "--scroll-y".to_string(),
-            scroll_y.to_string(),
-        ];
-        if let Some(x) = x {
-            args.push("--x".to_string());
-            args.push(x.to_string());
-        }
-        if let Some(y) = y {
-            args.push("--y".to_string());
-            args.push(y.to_string());
-        }
-
-        self.msg(args)
     }
 
     fn cua_screenshot_window(&self, window_id: u64, path: &Path, notify: bool) -> Result<()> {
@@ -998,6 +1135,30 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Result<()> {
         thread::sleep(Duration::from_millis(40));
     }
     Err(anyhow!("timed out waiting for {}", path.display()))
+}
+
+fn generate_session_id() -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?
+        .as_millis();
+    Ok(format!("s{}-{now}", std::process::id()))
+}
+
+fn normalize_session_id(session_id: String) -> Result<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err(anyhow!("session_id must not be empty"));
+    }
+    if !session_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(anyhow!(
+            "session_id may only contain ASCII letters, digits, '-' and '_'"
+        ));
+    }
+    Ok(session_id.to_owned())
 }
 
 impl EnvDefaults {

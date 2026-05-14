@@ -1,4 +1,5 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+tic_quickshell_bin := "~/.local/share/tic-shell/noctalia-qs/bin/qs"
 
 default:
     @just --list
@@ -17,30 +18,30 @@ install-cua:
 
 # Run the integrated Noctalia left bar with the tic workspace rail.
 sidebar:
-    bin/tic-sidebar start
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar start
 
 # Alias for `just sidebar`.
 run-sidebar: sidebar
 
 # Stop the integrated Noctalia/tic sidebar.
 stop-sidebar:
-    bin/tic-sidebar stop
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar stop
 
 # Toggle the running sidebar.
 toggle-sidebar:
-    bin/tic-sidebar toggle
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar toggle
 
 # Show the running sidebar.
 show-sidebar:
-    bin/tic-sidebar show
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar show
 
 # Hide the running sidebar.
 hide-sidebar:
-    bin/tic-sidebar hide
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar hide
 
 # Toggle the Codex rail inside the running sidebar.
 toggle-agent:
-    bin/tic-sidebar toggle-agent
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar toggle-agent
 
 # Run the Bun ACP bridge tests.
 test-agent:

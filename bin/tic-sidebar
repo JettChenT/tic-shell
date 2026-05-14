@@ -10,9 +10,31 @@ export TIC_SHELL_ROOT="${TIC_SHELL_ROOT:-$repo_root}"
 export NOCTALIA_CONFIG_DIR="${NOCTALIA_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tic-shell/noctalia}"
 export NOCTALIA_CACHE_DIR="${NOCTALIA_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/tic-shell/noctalia}"
 
+expand_user_path() {
+  case "$1" in
+    "~")
+      printf '%s\n' "$HOME"
+      ;;
+    "~/"*)
+      printf '%s/%s\n' "$HOME" "${1#\~/}"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
 find_quickshell() {
   if [[ -n "${TIC_QUICKSHELL_BIN:-}" ]]; then
-    printf '%s\n' "$TIC_QUICKSHELL_BIN"
+    qscmd="$(expand_user_path "$TIC_QUICKSHELL_BIN")"
+    if [[ -x "$qscmd" ]]; then
+      printf '%s\n' "$qscmd"
+      return
+    fi
+  fi
+  local_qs=~/.local/share/tic-shell/noctalia-qs/bin/qs
+  if [[ -x "$local_qs" ]]; then
+    printf '%s\n' "$local_qs"
     return
   fi
   if command -v qs >/dev/null 2>&1; then

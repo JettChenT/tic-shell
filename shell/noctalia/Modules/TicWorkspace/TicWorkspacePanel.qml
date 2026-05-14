@@ -80,6 +80,10 @@ Item {
     agentBridge.sendControl(type);
   }
 
+  function deactivateAgentSession() {
+    agentBridge.deactivate();
+  }
+
   function builtInAgentCommands() {
     return [
       { name: "clear", description: "Clear this workspace session" },
@@ -294,12 +298,18 @@ Item {
   }
 
   function hideSidebar() {
+    if (!TicWorkspaceState.collapsed && !TicWorkspaceState.agentPaneCollapsed) {
+      deactivateAgentSession();
+    }
     TicWorkspaceState.collapsed = true;
     scheduleRecenter();
   }
 
   function toggleSidebar() {
     TicWorkspaceState.toggleCollapsed();
+    if (TicWorkspaceState.collapsed && !TicWorkspaceState.agentPaneCollapsed) {
+      deactivateAgentSession();
+    }
     scheduleRecenter();
   }
 
@@ -309,12 +319,18 @@ Item {
   }
 
   function hideAgentPane() {
+    if (!TicWorkspaceState.agentPaneCollapsed) {
+      deactivateAgentSession();
+    }
     TicWorkspaceState.agentPaneCollapsed = true;
     scheduleRecenter();
   }
 
   function toggleAgentPane() {
     TicWorkspaceState.toggleAgentPane();
+    if (TicWorkspaceState.agentPaneCollapsed) {
+      deactivateAgentSession();
+    }
     scheduleRecenter();
   }
 

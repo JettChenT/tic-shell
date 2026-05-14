@@ -97,6 +97,18 @@ Item {
     });
   }
 
+  function deactivate() {
+    if (!codexAgent.running) {
+      return;
+    }
+
+    codexAgent.write(JSON.stringify({
+      type: "deactivate",
+      workspaceKey: workspaceKey,
+      workspaceTitle: workspaceTitle
+    }) + "\n");
+  }
+
   function notifyWorkspace() {
     if (!codexAgent.running) {
       return;
