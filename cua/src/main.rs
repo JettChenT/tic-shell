@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
-use image::{GenericImage, ImageBuffer, Rgba};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
@@ -11,7 +10,6 @@ use rmcp::{
     transport::io::stdio,
 };
 use serde::{Deserialize, Serialize};
-use std::cmp;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -40,7 +38,7 @@ enum Commands {
     #[command(alias = "describe_workspace")]
     DescribeWorkspace {
         workspace_id: Option<u64>,
-        #[arg(long, help = "Capture each window and build a workspace composite screenshot.")]
+        #[arg(long, help = "Capture one compositor-rendered workspace screenshot.")]
         screenshots: bool,
     },
     #[command(alias = "screenshot_window")]
@@ -246,7 +244,8 @@ fn main() -> Result<()> {
             workspace_id,
             screenshots,
         } => {
-            let output = describe_workspace(&niri, workspace_id, cli.intrusive_fallback, screenshots)?;
+            let output =
+                describe_workspace(&niri, workspace_id, cli.intrusive_fallback, screenshots)?;
             print_json(&output)?;
         }
         Commands::ScreenshotWindow { window_id } => {
@@ -495,7 +494,7 @@ fn tool_error(err: anyhow::Error) -> CallToolResult {
 fn describe_workspace(
     niri: &Niri,
     workspace_id: Option<u64>,
-    intrusive_fallback: bool,
+    _intrusive_fallback: bool,
     include_screenshots: bool,
 ) -> Result<DescribeWorkspaceOutput> {
     let originally_focused_window = niri.focused_window().ok().map(|window| window.id);
@@ -509,12 +508,36 @@ fn describe_workspace(
         })?;
 
     let workspace = workspaces
-        .into_iter()
+        .iter()
         .find(|w| w.id == id || w.idx == id)
+        .cloned()
         .ok_or_else(|| anyhow!("workspace {id} was not found by id or idx"))?;
+    let output_scales: HashMap<String, f64> = niri
+        .outputs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|output| output.logical.map(|logical| (output.name, logical.scale)))
+        .collect();
+    let workspace_scales: HashMap<u64, f64> = workspaces
+        .iter()
+        .filter_map(|workspace| {
+            workspace
+                .output
+                .as_ref()
+                .and_then(|output| output_scales.get(output).copied())
+                .map(|scale| (workspace.id, scale))
+        })
+        .collect();
 
     let dir = if include_screenshots {
         Some(capture_dir()?)
+    } else {
+        None
+    };
+    let composite_screenshot = if let Some(dir) = &dir {
+        let path = dir.join(format!("workspace-{}-composite.png", workspace.id));
+        niri.cua_screenshot_workspace(workspace.id, &path, false)?;
+        Some(path)
     } else {
         None
     };
@@ -525,21 +548,10 @@ fn describe_workspace(
         .collect();
 
     let mut infos = Vec::with_capacity(windows.len());
-    let mut screenshots = Vec::new();
     for window in windows {
-        let (screenshot, screenshot_error) = if let Some(dir) = &dir {
-            match screenshot_window(niri, window.id, dir, intrusive_fallback) {
-                Ok(path) => (Some(path), None),
-                Err(err) => (None, Some(error_chain(&err))),
-            }
-        } else {
-            (None, None)
-        };
-        let screenshot_size = screenshot.as_deref().and_then(|path| image_size(path).ok());
-        let scale = niri.window_scale(&window).ok();
-        if let Some(path) = &screenshot {
-            screenshots.push(path.clone());
-        }
+        let scale = window
+            .workspace_id
+            .and_then(|workspace_id| workspace_scales.get(&workspace_id).copied());
         infos.push(WindowInfo {
             id: window.id,
             title: window.title.unwrap_or_else(|| "(untitled)".to_string()),
@@ -547,25 +559,14 @@ fn describe_workspace(
             pid: window.pid,
             is_focused: window.is_focused,
             is_floating: window.is_floating,
-            screenshot,
-            screenshot_error,
+            screenshot: None,
+            screenshot_error: None,
             size: window.layout.window_size,
-            screenshot_size,
+            screenshot_size: None,
             scale,
             coordinate_space: "screenshot_pixels",
         });
     }
-
-    let composite_screenshot = if screenshots.is_empty() {
-        None
-    } else {
-        let path = dir
-            .as_ref()
-            .expect("screenshots are only collected when a capture dir exists")
-            .join(format!("workspace-{}-composite.png", workspace.id));
-        make_composite(&screenshots, &path)?;
-        Some(path)
-    };
 
     if let Some(window_id) = originally_focused_window {
         let _ = niri.focus_window(window_id);
@@ -677,40 +678,6 @@ fn screenshot_coord_to_logical(coord: u32, scale: f64) -> Result<u32> {
         return Err(anyhow!("invalid output scale {scale}"));
     }
     Ok((f64::from(coord) / scale).round().max(0.0) as u32)
-}
-
-fn make_composite(paths: &[PathBuf], out: &Path) -> Result<()> {
-    let mut images = Vec::new();
-    for path in paths {
-        images.push(
-            image::open(path)
-                .with_context(|| format!("open {}", path.display()))?
-                .to_rgba8(),
-        );
-    }
-
-    let columns = cmp::min(2, images.len() as u32);
-    let rows = (images.len() as u32).div_ceil(columns);
-    let max_w = images.iter().map(|img| img.width()).max().unwrap_or(1);
-    let max_h = images.iter().map(|img| img.height()).max().unwrap_or(1);
-    let gap = 16;
-    let width = columns * max_w + (columns + 1) * gap;
-    let height = rows * max_h + (rows + 1) * gap;
-    let mut canvas: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(width, height, Rgba([24, 24, 24, 255]));
-
-    for (idx, image) in images.iter().enumerate() {
-        let col = idx as u32 % columns;
-        let row = idx as u32 / columns;
-        let x = gap + col * (max_w + gap);
-        let y = gap + row * (max_h + gap);
-        canvas.copy_from(image, x, y)?;
-    }
-
-    canvas
-        .save(out)
-        .with_context(|| format!("save {}", out.display()))?;
-    Ok(())
 }
 
 fn capture_dir() -> Result<PathBuf> {
@@ -928,6 +895,25 @@ impl Niri {
             "cua-screenshot-window",
             "--id",
             &window_id.to_string(),
+            "--write-to-disk",
+            "true",
+            "--notify",
+            if notify { "true" } else { "false" },
+            "--path",
+            path,
+        ])?;
+        wait_for_file(Path::new(path), Duration::from_secs(5))
+    }
+
+    fn cua_screenshot_workspace(&self, workspace_id: u64, path: &Path, notify: bool) -> Result<()> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow!("non-utf8 screenshot path"))?;
+        self.msg([
+            "action",
+            "cua-screenshot-workspace",
+            "--id",
+            &workspace_id.to_string(),
             "--write-to-disk",
             "true",
             "--notify",

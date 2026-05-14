@@ -253,10 +253,11 @@ test("workspace setup creates per-workspace AGENTS instructions", async () => {
     assert.match(agentsMd, /`cua` MCP server is attached/);
     assert.match(agentsMd, /Do not run the legacy `cua \.\.\.` shell CLI/);
     assert.match(agentsMd, /`view-window` captures a single window/);
-    assert.match(agentsMd, /`describe-workspace` returns fast window metadata by default/);
+    assert.match(agentsMd, /`describe-workspace` returns window metadata and can include an efficient composite workspace screenshot/);
     assert.match(agentsMd, /include_screenshots=true/);
     assert.match(agentsMd, /window-relative screenshot\/image pixel coordinates/);
     assert.match(agentsMd, /Do not call `describe-workspace` as a reflex/);
+    assert.match(agentsMd, /include_screenshots=true` is a reasonable way to orient visually/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
