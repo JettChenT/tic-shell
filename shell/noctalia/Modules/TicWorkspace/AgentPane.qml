@@ -1,138 +1,111 @@
 import QtQuick
-
-import "Widgets" as Widgets
+import QtWebEngine
 
 Item {
   id: root
 
   property var shell
+  property bool webReady: false
 
   visible: !shell.sidebarCollapsed && !shell.agentPaneCollapsed
   width: shell.agentPaneWidth
   height: parent ? parent.height : 0
 
-  Column {
+  function cssColor(colorValue) {
+    const value = String(colorValue || "#000000");
+    if (/^#[0-9a-fA-F]{8}$/.test(value)) {
+      return "#" + value.substring(3, 9) + value.substring(1, 3);
+    }
+    return value;
+  }
+
+  function statePayload() {
+    return {
+      status: root.shell.agentStatus,
+      events: root.shell.agentEvents || [],
+      commands: root.shell.allAgentCommands(),
+      references: root.shell.referenceItems(""),
+      workspaceTitle: root.shell.activeWorkspaceLabel,
+      theme: {
+        primary: cssColor(root.shell.mPrimary),
+        onPrimary: cssColor(root.shell.mOnPrimary),
+        secondary: cssColor(root.shell.mSecondary),
+        tertiary: cssColor(root.shell.mTertiary),
+        error: cssColor(root.shell.mError),
+        onError: cssColor(root.shell.mOnError),
+        surface: cssColor(root.shell.mSurface),
+        onSurface: cssColor(root.shell.mOnSurface),
+        surfaceVariant: cssColor(root.shell.mSurfaceVariant),
+        onSurfaceVariant: cssColor(root.shell.mOnSurfaceVariant),
+        outline: cssColor(root.shell.mOutline),
+        capsule: cssColor(root.shell.capsuleColor),
+        capsuleHover: cssColor(root.shell.capsuleHoverColor)
+      }
+    };
+  }
+
+  function pushState() {
+    if (!webReady) {
+      return;
+    }
+    const script = "window.ticAgent && window.ticAgent.receive(" + JSON.stringify(statePayload()) + ");";
+    agentWebView.runJavaScript(script);
+  }
+
+  function handleWebMessage(rawMessage) {
+    let message = null;
+    try {
+      message = JSON.parse(rawMessage);
+    } catch (error) {
+      return;
+    }
+
+    if (message.type === "ready" || message.type === "requestState") {
+      webReady = true;
+      pushState();
+    } else if (message.type === "prompt") {
+      root.shell.sendAgentPrompt(String(message.text || ""));
+    } else if (message.type === "control") {
+      root.shell.sendAgentControl(String(message.action || ""));
+    }
+  }
+
+  WebEngineView {
+    id: agentWebView
+
     anchors.fill: parent
-    anchors.margins: 12
-    spacing: 10
+    url: "file://" + root.shell.ticShellRoot + "/shell/noctalia/Modules/TicWorkspace/Web/index.html?v=8"
+    backgroundColor: "transparent"
 
-    Column {
-      width: parent.width
-      height: 34
-      spacing: 3
-
-      Row {
-        width: parent.width
-        height: 28
-        spacing: 6
-
-        Text {
-          width: parent.width - newSessionButton.width - clearSessionButton.width - cancelSessionButton.width - parent.spacing * 3
-          height: parent.height
-          color: root.shell.mOnSurface
-          font.pixelSize: 17
-          font.weight: Font.DemiBold
-          verticalAlignment: Text.AlignVCenter
-          text: "Codex"
-          elide: Text.ElideRight
-        }
-
-        Widgets.SidebarButton {
-          id: newSessionButton
-
-          width: 28
-          height: 28
-          label: "+"
-          labelSize: 18
-          labelColor: root.shell.mPrimary
-          backgroundColor: root.shell.capsuleColor
-          hoverColor: root.shell.capsuleHoverColor
-          borderColor: root.shell.mOutline
-          onClicked: root.shell.sendAgentControl("new")
-        }
-
-        Widgets.SidebarButton {
-          id: clearSessionButton
-
-          width: 28
-          height: 28
-          label: "C"
-          labelColor: root.shell.mOnSurface
-          labelSize: 13
-          labelWeight: Font.DemiBold
-          backgroundColor: root.shell.capsuleColor
-          hoverColor: root.shell.capsuleHoverColor
-          borderColor: root.shell.mOutline
-          onClicked: root.shell.sendAgentControl("clear")
-        }
-
-        Widgets.SidebarButton {
-          id: cancelSessionButton
-
-          width: 28
-          height: 28
-          label: "x"
-          labelColor: root.shell.mError
-          labelSize: 15
-          labelWeight: Font.DemiBold
-          backgroundColor: root.shell.capsuleColor
-          hoverColor: root.shell.capsuleHoverColor
-          borderColor: root.shell.mOutline
-          onClicked: root.shell.sendAgentControl("cancel")
-        }
-      }
-
-      Text {
-        visible: root.shell.agentStatus === "error" || root.shell.agentStatus === "stopped"
-        width: parent.width
-        height: 16
-        color: root.shell.mError
-        font.pixelSize: 12
-        text: visible ? root.shell.agentStatus : ""
-        elide: Text.ElideRight
+    onLoadingChanged: loadRequest => {
+      if (loadRequest.status === WebEngineView.LoadSucceededStatus) {
+        root.webReady = true;
+        root.pushState();
       }
     }
 
-    Flickable {
-      id: agentTranscript
-
-      function scrollToBottom() {
-        Qt.callLater(function() {
-          contentY = Math.max(0, contentHeight - height);
-        });
-      }
-
-      width: parent.width
-      height: parent.height - y - agentInputBox.height - 10
-      clip: true
-      contentWidth: width
-      contentHeight: agentEventColumn.height
-      onContentHeightChanged: scrollToBottom()
-      onHeightChanged: scrollToBottom()
-      onVisibleChanged: if (visible) scrollToBottom()
-
-      Column {
-        id: agentEventColumn
-
-        width: agentTranscript.width
-        spacing: 8
-
-        Repeater {
-          model: root.shell.agentEvents
-
-          Widgets.AgentEventBubble {
-            shell: root.shell
-            event: modelData
-          }
-        }
+    onJavaScriptConsoleMessage: (level, message, lineNumber, sourceID) => {
+      const prefix = "__tic_agent__:";
+      if (message.indexOf(prefix) === 0) {
+        root.handleWebMessage(message.substring(prefix.length));
+      } else {
+        console.log("AgentWeb", sourceID + ":" + lineNumber, message);
       }
     }
+  }
 
-    Widgets.AgentPromptBox {
-      id: agentInputBox
+  Timer {
+    id: syncTimer
 
-      shell: root.shell
-      onPromptAccepted: text => root.shell.sendAgentPrompt(text)
+    interval: 160
+    repeat: true
+    running: root.visible
+    onTriggered: root.pushState()
+  }
+
+  onVisibleChanged: {
+    if (visible) {
+      pushState();
     }
   }
 }

@@ -31,7 +31,7 @@ function createClient({ child, emitMessage = emit, workspaceRoot = defaultWorksp
 let nextId = 1;
 let nextEntryId = 1;
 let initialized = false;
-let agentTitle = "Codex";
+let agentTitle = "Agent";
 const pending = new Map();
 let activeWorkspaceKey = "workspace:default";
 let activeWorkspaceTitle = "Workspace";
@@ -131,12 +131,13 @@ function snapshot(state = workspace()) {
   emitWorkspace();
 }
 
-function appendEntry(state, kind, title, body = "", id = "") {
+function appendEntry(state, kind, title, body = "", id = "", metadata = {}) {
   const entry = {
     id: id || `${kind}:${nextEntryId++}`,
     kind,
     title,
     body,
+    metadata,
     time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
   };
   state.entries.push(entry);
@@ -155,7 +156,7 @@ function removeEntry(state, id) {
   }
 }
 
-function replaceEntry(state, id, kind, title, body = "") {
+function replaceEntry(state, id, kind, title, body = "", metadata = {}) {
   const index = state.entries.findIndex(entry => entry.id === id);
   if (index >= 0) {
     state.entries[index] = {
@@ -163,6 +164,7 @@ function replaceEntry(state, id, kind, title, body = "") {
       kind,
       title,
       body,
+      metadata,
       time: state.entries[index].time,
     };
   } else {
@@ -171,6 +173,7 @@ function replaceEntry(state, id, kind, title, body = "") {
       kind,
       title,
       body,
+      metadata,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
     });
   }
@@ -194,7 +197,7 @@ function event(kind, title, body = "") {
 
 function showThinking(state) {
   clearThinking(state);
-  const entry = appendEntry(state, "thinking", "Thinking", "", `thinking:${state.key}`);
+  const entry = appendEntry(state, "thinking", "Thinking", "", `thinking:${state.key}`, { active: true });
   state.thinkingEntryId = entry.id;
 }
 
@@ -354,7 +357,7 @@ function initialize() {
     },
   }, result => {
     initialized = true;
-    agentTitle = result?.agentInfo?.title || result?.agentInfo?.name || "Codex";
+    agentTitle = "Agent";
     newSession(workspace());
   });
 }
@@ -491,12 +494,12 @@ The workspace \`Key\` is tic-shell UI metadata, not a CUA argument. Never pass v
 
 Useful MCP tools:
 - \`view-window\` captures a single window and returns the PNG image directly. Prefer this when you already know the target window id.
-- \`describe-workspace\` returns window metadata plus a composite screenshot of this workspace. Use it when you need to discover window ids or get an overview.
+- \`describe-workspace\` returns fast window metadata by default. Use it to discover window ids. Set \`include_screenshots=true\` only when you really need a composite workspace screenshot.
 - \`click\` clicks inside a window at window-relative screenshot/image pixel coordinates.
 - \`type-text\` types into a window.
 - \`scroll\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels.
 
-Do not call \`describe-workspace\` as a reflex before every action. If a recent tool result already identified the window, call \`view-window\` directly to inspect it.
+Do not call \`describe-workspace\` as a reflex before every action, and do not enable screenshots unless visual workspace overview is required. If a recent tool result already identified the window, call \`view-window\` directly to inspect it.
 
 The real tic-shell checkout is intentionally not your working directory. Use this folder for notes and temporary files, and use the \`cua\` MCP tools to inspect or act on the live desktop.
 `;
@@ -556,7 +559,7 @@ function handleSlashCommand(state, text) {
     appendEntry(
       state,
       "assistant",
-      "Codex",
+      "Agent",
       commandList(state).map(item => `/${item.name}${item.description ? ` - ${item.description}` : ""}`).join("\n")
     );
     return true;
@@ -647,6 +650,88 @@ function textFromContent(content) {
   return "";
 }
 
+function visitContent(content, visitor) {
+  if (!content) {
+    return;
+  }
+  visitor(content);
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      visitContent(item, visitor);
+    }
+    return;
+  }
+  if (content.content) {
+    visitContent(content.content, visitor);
+  }
+  if (content.fields?.content) {
+    visitContent(content.fields.content, visitor);
+  }
+  if (content.rawOutput || content.raw_output) {
+    visitContent(content.rawOutput || content.raw_output, visitor);
+  }
+}
+
+function imageFromContent(content) {
+  let image = null;
+  visitContent(content, item => {
+    if (image || !item || typeof item !== "object") {
+      return;
+    }
+    const type = String(item.type || item.kind || "").toLowerCase();
+    const data = item.data || item.base64 || item.image?.data || item.content?.data;
+    const mimeType = item.mimeType || item.mime_type || item.mediaType || item.media_type || item.image?.mimeType || item.image?.mime_type || "image/png";
+    if ((type === "image" || type === "image_content" || item.mimeType || item.mime_type) && typeof data === "string" && data.length > 0) {
+      image = {
+        mimeType,
+        data,
+        source: data.startsWith("data:") ? data : `data:${mimeType};base64,${data}`,
+      };
+    }
+  });
+  return image;
+}
+
+function toolNameFrom(update) {
+  const meta = update.meta || update.fields?.meta || {};
+  const candidates = [
+    update.toolName,
+    update.tool_name,
+    update.name,
+    update.fields?.toolName,
+    update.fields?.tool_name,
+    meta.toolName,
+    meta.tool_name,
+  ].filter(Boolean);
+  if (candidates.length > 0) {
+    return String(candidates[0]);
+  }
+
+  const title = String(update.title || update.fields?.title || "").toLowerCase();
+  for (const name of ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll"]) {
+    if (title.includes(name)) {
+      return name;
+    }
+  }
+  return "";
+}
+
+function toolMetadata(update) {
+  const toolName = toolNameFrom(update).replace(/_/g, "-").toLowerCase();
+  const title = String(update.title || update.fields?.title || "").toLowerCase();
+  const isCua = ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll"].includes(toolName)
+    || title.includes("describe-workspace")
+    || title.includes("view-window")
+    || title.includes("cua");
+  const content = update.content || update.fields?.content || update.rawOutput || update.raw_output || update.fields?.rawOutput || update.fields?.raw_output;
+
+  return {
+    toolName,
+    isCua,
+    image: imageFromContent(content),
+  };
+}
+
 function statusFromTool(update) {
   return update.fields?.status || update.status || update.content?.status || "pending";
 }
@@ -687,7 +772,7 @@ function handleToolCall(state, update) {
   };
   const title = next.title || next.fields?.title || id || "Tool call";
   state.tools.set(id, next);
-  replaceEntry(state, `tool:${id}`, "tool", title, contentFromTool(next));
+  replaceEntry(state, `tool:${id}`, "tool", title, contentFromTool(next), toolMetadata(next));
 }
 
 function handleUserChunk(state, update) {
@@ -749,7 +834,7 @@ function handleUpdate(update, sessionId = "") {
     case "session_info_update": {
       const title = update.title && update.title.value !== undefined ? update.title.value : update.title;
       if (typeof title === "string" && title.trim()) {
-        agentTitle = title;
+        agentTitle = "Agent";
       }
       break;
     }
@@ -894,7 +979,7 @@ function handleExit(code, signal) {
 
 function handleSpawnError(err) {
   status("error");
-  event("error", "Failed to start Codex ACP", err.message);
+  event("error", "Failed to start Agent", err.message);
 }
 
 return {

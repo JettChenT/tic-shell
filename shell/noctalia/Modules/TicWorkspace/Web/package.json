@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "streamdown": "^2.5.0"
+  },
+  "private": true,
+  "scripts": {
+    "build": "bun build ./src/App.jsx --target=browser --format=iife --outfile=./dist/agent-chat.js"
+  },
+  "type": "module"
+}

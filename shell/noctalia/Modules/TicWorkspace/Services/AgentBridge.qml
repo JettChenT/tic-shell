@@ -30,8 +30,9 @@ Item {
     events = nextEvents.map((entry, index) => ({
       id: entry.id || ("entry:" + index),
       kind: entry.kind || "system",
-      title: entry.title || "Codex",
+      title: entry.title || "Agent",
       body: entry.body || "",
+      metadata: entry.metadata || {},
       time: entry.time || Qt.formatTime(new Date(), "HH:mm")
     }));
   }
@@ -52,7 +53,7 @@ Item {
         commands = message.commands || [];
         workspaceMessage(message.title || workspaceTitle);
       } else if (message.type === "event") {
-        appendEvent(message.kind || "system", message.title || "Codex", message.body || "");
+        appendEvent(message.kind || "system", message.title || "Agent", message.body || "");
       }
     } catch (error) {
       appendEvent("stderr", "codex-agent", trimmed);
@@ -137,7 +138,7 @@ Item {
     onStarted: root.status = "starting"
     onExited: (exitCode, exitStatus) => {
       root.status = "stopped";
-      root.appendEvent("system", "Codex agent stopped", "exit " + exitCode);
+      root.appendEvent("system", "Agent stopped", "exit " + exitCode);
     }
   }
 

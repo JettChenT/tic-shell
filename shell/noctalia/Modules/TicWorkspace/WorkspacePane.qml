@@ -32,7 +32,7 @@ Item {
         id: toggleAgentPaneButton
 
         visible: !root.shell.sidebarCollapsed
-        label: "C"
+        label: "A"
         labelSize: 13
         labelWeight: Font.DemiBold
         labelColor: root.shell.agentPaneCollapsed ? root.shell.mOnSurfaceVariant : root.shell.mPrimary

@@ -117,7 +117,7 @@ test("thought chunks render as thinking blocks and do not merge into assistant c
 
   assert.deepEqual(latestSnapshot(messages).map(entry => [entry.kind, entry.title, entry.body]), [
     ["thinking", "Thinking", "thinking"],
-    ["assistant", "Codex", "answer"],
+    ["assistant", "Agent", "answer"],
   ]);
 });
 
@@ -150,6 +150,28 @@ test("tool updates replace the existing tool entry", () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0].id, "tool:tool-1");
   assert.equal(entries[0].body, "completed\ndone");
+});
+
+test("cua image tool calls include metadata for the shell renderer", () => {
+  const { client, messages } = makeClient();
+
+  client.handleAgentMessage({
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-image",
+        title: "view-window",
+        status: "completed",
+        content: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" }],
+      },
+    },
+  });
+
+  const entry = latestSnapshot(messages)[0];
+  assert.equal(entry.metadata.toolName, "view-window");
+  assert.equal(entry.metadata.isCua, true);
+  assert.equal(entry.metadata.image.source, "data:image/png;base64,iVBORw0KGgo=");
 });
 
 test("echoed user chunks are ignored when prompt was already added locally", () => {
@@ -231,7 +253,8 @@ test("workspace setup creates per-workspace AGENTS instructions", async () => {
     assert.match(agentsMd, /`cua` MCP server is attached/);
     assert.match(agentsMd, /Do not run the legacy `cua \.\.\.` shell CLI/);
     assert.match(agentsMd, /`view-window` captures a single window/);
-    assert.match(agentsMd, /`describe-workspace` returns window metadata plus a composite screenshot/);
+    assert.match(agentsMd, /`describe-workspace` returns fast window metadata by default/);
+    assert.match(agentsMd, /include_screenshots=true/);
     assert.match(agentsMd, /window-relative screenshot\/image pixel coordinates/);
     assert.match(agentsMd, /Do not call `describe-workspace` as a reflex/);
   } finally {

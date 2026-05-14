@@ -38,7 +38,11 @@ enum Commands {
     #[command(alias = "server")]
     Mcp,
     #[command(alias = "describe_workspace")]
-    DescribeWorkspace { workspace_id: Option<u64> },
+    DescribeWorkspace {
+        workspace_id: Option<u64>,
+        #[arg(long, help = "Capture each window and build a workspace composite screenshot.")]
+        screenshots: bool,
+    },
     #[command(alias = "screenshot_window")]
     ScreenshotWindow { window_id: u64 },
     Click {
@@ -73,6 +77,8 @@ enum ScrollDirection {
 struct DescribeWorkspaceParams {
     /// Optional numeric niri workspace id or index, for example 1. Do not pass tic-shell keys like niri:workspace:1. Defaults to this MCP session's workspace via CUA_WORKSPACE_ID, then the focused workspace.
     workspace_id: Option<u64>,
+    /// Capture each window and return a composite screenshot. Defaults to false because window metadata is much faster.
+    include_screenshots: Option<bool>,
     /// Use grim after focusing windows if compositor-native screenshots are unavailable.
     intrusive_fallback: Option<bool>,
 }
@@ -183,7 +189,7 @@ struct LogicalOutput {
 struct DescribeWorkspaceOutput {
     compositor: &'static str,
     workspace: Workspace,
-    screenshot_dir: PathBuf,
+    screenshot_dir: Option<PathBuf>,
     composite_screenshot: Option<PathBuf>,
     windows: Vec<WindowInfo>,
 }
@@ -236,8 +242,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Mcp => unreachable!("MCP mode is handled before niri discovery"),
-        Commands::DescribeWorkspace { workspace_id } => {
-            let output = describe_workspace(&niri, workspace_id, cli.intrusive_fallback)?;
+        Commands::DescribeWorkspace {
+            workspace_id,
+            screenshots,
+        } => {
+            let output = describe_workspace(&niri, workspace_id, cli.intrusive_fallback, screenshots)?;
             print_json(&output)?;
         }
         Commands::ScreenshotWindow { window_id } => {
@@ -321,7 +330,7 @@ struct CuaMcpServer {
 impl CuaMcpServer {
     #[tool(
         name = "describe-workspace",
-        description = "Return niri workspace/window metadata and a composite screenshot of the workspace."
+        description = "Return niri workspace/window metadata. Set include_screenshots=true only when a composite screenshot is needed."
     )]
     fn describe_workspace(
         &self,
@@ -375,6 +384,7 @@ impl CuaMcpServer {
             &niri,
             params.workspace_id,
             self.intrusive_fallback(params.intrusive_fallback),
+            params.include_screenshots.unwrap_or(false),
         )?;
         let mut content = vec![Content::text(serde_json::to_string_pretty(&output)?)];
         if let Some(path) = &output.composite_screenshot {
@@ -486,6 +496,7 @@ fn describe_workspace(
     niri: &Niri,
     workspace_id: Option<u64>,
     intrusive_fallback: bool,
+    include_screenshots: bool,
 ) -> Result<DescribeWorkspaceOutput> {
     let originally_focused_window = niri.focused_window().ok().map(|window| window.id);
     let workspaces = niri.workspaces()?;
@@ -502,7 +513,11 @@ fn describe_workspace(
         .find(|w| w.id == id || w.idx == id)
         .ok_or_else(|| anyhow!("workspace {id} was not found by id or idx"))?;
 
-    let dir = capture_dir()?;
+    let dir = if include_screenshots {
+        Some(capture_dir()?)
+    } else {
+        None
+    };
     let windows: Vec<Window> = niri
         .windows()?
         .into_iter()
@@ -512,10 +527,13 @@ fn describe_workspace(
     let mut infos = Vec::with_capacity(windows.len());
     let mut screenshots = Vec::new();
     for window in windows {
-        let screenshot_result = screenshot_window(niri, window.id, &dir, intrusive_fallback);
-        let (screenshot, screenshot_error) = match screenshot_result {
-            Ok(path) => (Some(path), None),
-            Err(err) => (None, Some(error_chain(&err))),
+        let (screenshot, screenshot_error) = if let Some(dir) = &dir {
+            match screenshot_window(niri, window.id, dir, intrusive_fallback) {
+                Ok(path) => (Some(path), None),
+                Err(err) => (None, Some(error_chain(&err))),
+            }
+        } else {
+            (None, None)
         };
         let screenshot_size = screenshot.as_deref().and_then(|path| image_size(path).ok());
         let scale = niri.window_scale(&window).ok();
@@ -541,7 +559,10 @@ fn describe_workspace(
     let composite_screenshot = if screenshots.is_empty() {
         None
     } else {
-        let path = dir.join(format!("workspace-{}-composite.png", workspace.id));
+        let path = dir
+            .as_ref()
+            .expect("screenshots are only collected when a capture dir exists")
+            .join(format!("workspace-{}-composite.png", workspace.id));
         make_composite(&screenshots, &path)?;
         Some(path)
     };

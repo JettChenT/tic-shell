@@ -58,6 +58,7 @@ Item {
   property bool sidebarCollapsed: TicWorkspaceState.collapsed
   property bool agentPaneCollapsed: TicWorkspaceState.agentPaneCollapsed
   property int slashCommandIndex: 0
+  property int referenceIndex: 0
 
   implicitWidth: railWidth
   implicitHeight: Math.max(280, Math.min(720, screen ? Math.round(screen.height * 0.58) : 560))
@@ -130,6 +131,112 @@ Item {
     }
     const index = Math.max(0, Math.min(slashCommandIndex, commands.length - 1));
     return commands[index];
+  }
+
+  function referenceItems(query) {
+    const q = String(query || "").toLowerCase();
+    const result = [];
+    const workspaceSource = workspaceRows || [];
+    const windowSource = (windowRows || []).slice().sort((a, b) => {
+      if (a.focused !== b.focused) {
+        return a.focused ? -1 : 1;
+      }
+      if ((a.workspaceId === activeWorkspaceId) !== (b.workspaceId === activeWorkspaceId)) {
+        return a.workspaceId === activeWorkspaceId ? -1 : 1;
+      }
+      return a.id - b.id;
+    });
+
+    for (let i = 0; i < workspaceSource.length; i++) {
+      const ws = workspaceSource[i];
+      const label = "Workspace " + ws.label;
+      if (q.length === 0 || label.toLowerCase().indexOf(q) !== -1 || String(ws.idx).indexOf(q) !== -1) {
+        result.push({ type: "workspace", id: ws.id, label: label, detail: ws.output || "", icon: "layout-sidebar", appId: "", iconPath: "" });
+      }
+    }
+
+    for (let i = 0; i < windowSource.length; i++) {
+      const win = windowSource[i];
+      const title = win.title || windowTitle(win.id, windowRevision);
+      const appId = win.appId || "";
+      if (q.length === 0 || title.toLowerCase().indexOf(q) !== -1 || appId.toLowerCase().indexOf(q) !== -1 || String(win.id).indexOf(q) !== -1) {
+        result.push({ type: "window", id: win.id, label: title, detail: appId, icon: "window", appId: appId, iconPath: iconForAppId(appId), focused: win.focused });
+      }
+    }
+    return result;
+  }
+
+  function selectedReference(query) {
+    const items = referenceItems(query);
+    if (items.length === 0) {
+      return null;
+    }
+    const index = Math.max(0, Math.min(referenceIndex, items.length - 1));
+    return items[index];
+  }
+
+  function referenceMarkdown(item) {
+    if (!item) {
+      return "";
+    }
+    const safeLabel = String(item.label || item.type).replace(/[\[\]\n\r]/g, " ").trim();
+    return "[@" + safeLabel + "](tic://" + item.type + "/" + item.id + ")";
+  }
+
+  function referencesInText(text) {
+    const result = [];
+    const source = String(text || "");
+    const regex = /\[@([^\]]+)\]\(tic:\/\/(workspace|window)\/([^)]+)\)/g;
+    let match;
+    while ((match = regex.exec(source)) !== null) {
+      const type = match[2];
+      const id = Number(match[3]);
+      let item = null;
+      if (type === "workspace") {
+        const workspace = (workspaceRows || []).find(row => row.id === id);
+        item = { type, id, label: workspace ? "Workspace " + workspace.label : match[1], detail: workspace ? workspace.output : "", icon: "layout-sidebar", iconPath: "", appId: "" };
+      } else {
+        const win = (windowRows || []).find(row => row.id === id);
+        item = { type, id, label: win ? win.title : match[1], detail: win ? win.appId : "", icon: "window", iconPath: win ? iconForAppId(win.appId) : "", appId: win ? win.appId : "" };
+      }
+      result.push(item);
+    }
+    return result;
+  }
+
+  function referenceSegmentsInText(text) {
+    const result = [];
+    const source = String(text || "");
+    const regex = /\[@([^\]]+)\]\(tic:\/\/(workspace|window)\/([^)]+)\)/g;
+    let cursor = 0;
+    let match;
+    while ((match = regex.exec(source)) !== null) {
+      if (match.index > cursor) {
+        result.push({ kind: "text", text: source.substring(cursor, match.index) });
+      }
+
+      const type = match[2];
+      const id = Number(match[3]);
+      let reference = null;
+      if (type === "workspace") {
+        const workspace = (workspaceRows || []).find(row => row.id === id);
+        reference = { type, id, label: workspace ? "Workspace " + workspace.label : match[1], detail: workspace ? workspace.output : "", icon: "layout-sidebar", iconPath: "", appId: "" };
+      } else {
+        const win = (windowRows || []).find(row => row.id === id);
+        reference = { type, id, label: win ? win.title : match[1], detail: win ? win.appId : "", icon: "window", iconPath: win ? iconForAppId(win.appId) : "", appId: win ? win.appId : "" };
+      }
+      result.push({ kind: "reference", reference });
+      cursor = regex.lastIndex;
+    }
+
+    if (cursor < source.length) {
+      result.push({ kind: "text", text: source.substring(cursor) });
+    }
+    return result;
+  }
+
+  function textWithoutReferenceMarkdown(text) {
+    return String(text || "").replace(/\[@([^\]]+)\]\(tic:\/\/(workspace|window)\/([^)]+)\)/g, "@$1");
   }
 
   function currentAgentWorkspaceKey() {

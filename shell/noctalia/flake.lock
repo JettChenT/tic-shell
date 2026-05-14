@@ -25,18 +25,14 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1778377995,
-        "narHash": "sha256-uUzHDHqQF1rdVNiTa05L0mML3/d7fpbAShjCRWxbrBQ=",
-        "owner": "noctalia-dev",
-        "repo": "noctalia-qs",
-        "rev": "d8327a723eed6dd9aebe8e0b162126f390e827df",
-        "type": "github"
+        "path": "../../third_party/noctalia-qs",
+        "type": "path"
       },
       "original": {
-        "owner": "noctalia-dev",
-        "repo": "noctalia-qs",
-        "type": "github"
-      }
+        "path": "../../third_party/noctalia-qs",
+        "type": "path"
+      },
+      "parent": []
     },
     "root": {
       "inputs": {
