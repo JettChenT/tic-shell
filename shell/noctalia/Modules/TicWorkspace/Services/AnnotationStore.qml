@@ -1,12 +1,10 @@
 import QtQuick
-import Quickshell.Io
 
 Item {
   id: root
 
-  property string stateFile: ""
   property var annotations: ({})
-  property bool ready: false
+  property bool ready: true
 
   function workspaceKey(workspaceId) {
     return "niri:workspace:" + workspaceId;
@@ -32,32 +30,5 @@ Item {
     }
 
     annotations = next;
-    annotationAdapter.workspaces = annotations;
-    annotationFile.writeAdapter();
-  }
-
-  FileView {
-    id: annotationFile
-
-    path: root.stateFile
-    watchChanges: true
-    printErrors: false
-
-    adapter: JsonAdapter {
-      id: annotationAdapter
-
-      property var workspaces: ({})
-    }
-
-    onLoaded: {
-      root.annotations = annotationAdapter.workspaces || {};
-      root.ready = true;
-    }
-
-    onLoadFailed: function(error) {
-      root.annotations = {};
-      annotationAdapter.workspaces = root.annotations;
-      root.ready = true;
-    }
   }
 }

@@ -9,7 +9,14 @@ Rectangle {
   property var workspace
   readonly property var workspaceWindows: shell.windowStructureRevision >= 0 ? shell.windowsForWorkspace(workspace.id) : []
   readonly property bool current: workspace.id === shell.activeWorkspaceId || workspace.focused || workspace.active || editing
-  readonly property int windowListHeight: workspaceWindows.length * 28 + Math.max(0, workspaceWindows.length - 1) * 4
+  readonly property int windowListHeight: {
+    let total = Math.max(0, workspaceWindows.length - 1) * 4;
+    for (let i = 0; i < workspaceWindows.length; i++) {
+      const hasDescription = (workspaceWindows[i].description || "").length > 0;
+      total += (!root.shell.windowDescriptionsOneLine && hasDescription) ? 44 : 28;
+    }
+    return total;
+  }
   property bool editing: false
 
   signal selected(var workspace)

@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import qs.Commons
+import qs.Modules.TicWorkspace
 import qs.Services.Compositor
 
 Item {
@@ -64,19 +65,21 @@ Item {
     // Collect all windows from CompositorService
     for (var i = 0; i < CompositorService.windows.count; i++) {
       var win = CompositorService.windows.get(i);
+      var description = TicWorkspaceState.windowDescriptionFor(win.id, TicWorkspaceState.windowDescriptionRevision);
       items.push({
                    "id": win.id,
                    "title": win.title || "",
                    "appId": win.appId || "",
+                   "description": description,
                    "workspaceId": win.workspaceId,
                    "isFocused": win.isFocused,
-                   "searchText": (win.title + " " + win.appId).toLowerCase()
+                   "searchText": (win.title + " " + win.appId + " " + description).toLowerCase()
                  });
     }
 
     // Fuzzy search on title and appId
     var results = FuzzySort.go(trimmed, items, {
-                                 "keys": ["title", "appId"],
+                                 "keys": ["title", "appId", "description"],
                                  "limit": 10
                                });
 
@@ -95,7 +98,7 @@ Item {
 
       launcherItems.push({
                            "name": entry.title || entry.appId,
-                           "description": entry.appId,
+                           "description": entry.description || entry.appId,
                            "icon": iconName || "application-x-executable",
                            "isTablerIcon": false,
                            "badgeIcon": "app-window",
@@ -114,6 +117,7 @@ Item {
 
     for (var i = 0; i < CompositorService.windows.count; i++) {
       var win = CompositorService.windows.get(i);
+      var description = TicWorkspaceState.windowDescriptionFor(win.id, TicWorkspaceState.windowDescriptionRevision);
 
       var iconName = win.appId;
       var appEntry = ThemeIcons.findAppEntry(win.appId);
@@ -123,7 +127,7 @@ Item {
 
       launcherItems.push({
                            "name": win.title || win.appId,
-                           "description": win.appId,
+                           "description": description || win.appId,
                            "icon": iconName || "application-x-executable",
                            "isTablerIcon": false,
                            "badgeIcon": "app-window",

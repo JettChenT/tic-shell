@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Modules.TicWorkspace
 
 Item {
   id: root
@@ -12,8 +13,11 @@ Item {
   property string status: "starting"
   property var commands: []
   property var forkSessions: []
+  readonly property var windowDescriptions: TicWorkspaceState.windowDescriptions
+  property var debugSnapshot: ({})
 
   signal workspaceMessage(string title)
+  signal workspaceNameSet(int workspaceId, string name)
   signal forkComplete(string status, string title, string body)
 
   function appendEvent(kind, title, body) {
@@ -60,6 +64,18 @@ Item {
         forkSessions = message.sessions || [];
       } else if (message.type === "forkComplete") {
         forkComplete(message.status || "done", message.title || "Fork cursor", message.body || "");
+      } else if (message.type === "windowDescription") {
+        const windowId = String(message.window_id || "");
+        if (windowId.length > 0) {
+          TicWorkspaceState.setWindowDescription(windowId, message.description || "");
+        }
+      } else if (message.type === "workspaceName") {
+        const workspaceId = Number(message.workspace_id || 0);
+        if (workspaceId > 0) {
+          workspaceNameSet(workspaceId, message.name || "");
+        }
+      } else if (message.type === "debugSnapshot") {
+        debugSnapshot = message.snapshot || {};
       }
     } catch (error) {
       appendEvent("stderr", "codex-agent", trimmed);
@@ -95,7 +111,21 @@ Item {
     });
   }
 
-  function sendForkCursorPrompt(prompt, activeWindow) {
+  function prepareForkCursor(forkId, activeWindow) {
+    if (!forkId || forkId.length === 0) {
+      return;
+    }
+
+    writeMessage({
+      type: "prepare-fork-cursor",
+      forkId: forkId,
+      workspaceKey: workspaceKey,
+      workspaceTitle: workspaceTitle,
+      activeWindow: activeWindow || null
+    });
+  }
+
+  function sendForkCursorPrompt(forkId, prompt, activeWindow) {
     const trimmed = prompt.trim();
     if (trimmed.length === 0) {
       return;
@@ -103,6 +133,7 @@ Item {
 
     writeMessage({
       type: "fork-cursor",
+      forkId: forkId || "",
       text: trimmed,
       workspaceKey: workspaceKey,
       workspaceTitle: workspaceTitle,
@@ -117,6 +148,17 @@ Item {
 
     writeMessage({
       type: "select-fork",
+      id: id
+    });
+  }
+
+  function dismissFork(id) {
+    if (!id || id.length === 0) {
+      return;
+    }
+
+    writeMessage({
+      type: "dismiss-fork",
       id: id
     });
   }
@@ -156,13 +198,14 @@ Item {
   Process {
     id: codexAgent
 
-    command: ["bun", root.ticShellRoot + "/bin/tic-codex-agent"]
-    workingDirectory: Quickshell.env("HOME") || "/home/jettc"
+    command: ["cargo", "run", "--quiet", "--bin", "tic-daemon"]
+    workingDirectory: root.ticShellRoot
     stdinEnabled: true
     running: false
     environment: ({
       "HOME": Quickshell.env("HOME") || "/home/jettc",
       "PATH": "/run/current-system/sw/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.local/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.cargo/bin:" + (Quickshell.env("HOME") || "/home/jettc") + "/.bun/bin:" + (Quickshell.env("PATH") || ""),
+      "TIC_SHELL_ROOT": root.ticShellRoot,
       "TIC_CODEX_WORKDIR_ROOT": (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/tic-shell/codex-workspaces"
     })
 

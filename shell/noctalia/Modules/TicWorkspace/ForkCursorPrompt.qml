@@ -13,9 +13,22 @@ Item {
   property string activeScreenName: ""
   property string activeNamespace: ""
   property string promptText: ""
+  property bool submitted: false
 
   function namespaceForScreen(screen) {
     return "tic-fork-cursor-prompt-" + (screen?.name || "unknown");
+  }
+
+  function barPositionForActiveScreen() {
+    return Settings.getBarPositionForScreen(activeScreenName);
+  }
+
+  function overlaySideForActiveScreen() {
+    return barPositionForActiveScreen() === "right" ? "left" : "right";
+  }
+
+  function overlayGapForActiveScreen() {
+    return barPositionForActiveScreen() === "right" ? "32" : "18";
   }
 
   function openPrompt() {
@@ -27,21 +40,29 @@ Item {
       activeScreenName = screen?.name || "";
       activeNamespace = namespaceForScreen(screen);
       promptText = "";
-      promptOpen = true;
-      Qt.callLater(registerOverlay);
+      submitted = false;
+      promptOpen = false;
+      registerOverlay();
     }, true);
   }
 
   function closePrompt() {
+    if (promptOpen && !submitted) {
+      TicServices.ForkCursorService.cancelPrompt();
+    }
     unregisterOverlay();
     promptOpen = false;
     promptText = "";
+    submitted = false;
   }
 
   function submitPrompt() {
     const text = promptText.trim();
     if (text.length > 0) {
+      submitted = true;
       TicServices.ForkCursorService.submitPrompt(text);
+      closeAfterSubmitTimer.restart();
+      return;
     }
     closePrompt();
   }
@@ -55,8 +76,9 @@ Item {
       "--overlay-id", "tic-fork-cursor-prompt",
       "--layer-namespace", activeNamespace,
       "--anchor-hardware-pointer",
-      "--side", "right",
+      "--side", overlaySideForActiveScreen(),
       "--align", "center",
+      "--gap", overlayGapForActiveScreen(),
       "--edge-padding", "8",
       "--interactive",
       "--keyboard-focus",
@@ -79,6 +101,16 @@ Item {
   Process {
     id: overlayProcess
     running: false
+
+    onExited: function(exitCode) {
+      if (exitCode === 0 && root.activeNamespace) {
+        root.promptOpen = true;
+        TicServices.ForkCursorService.notifyPromptOpened();
+      } else {
+        root.promptOpen = false;
+        root.promptText = "";
+      }
+    }
   }
 
   Connections {
@@ -94,12 +126,21 @@ Item {
     running: false
   }
 
+  Timer {
+    id: closeAfterSubmitTimer
+
+    interval: 350
+    repeat: false
+    onTriggered: root.closePrompt()
+  }
+
   Variants {
     model: Quickshell.screens
 
     PanelWindow {
       id: promptWindow
 
+      required property var modelData
       property var modelScreen: modelData
 
       screen: modelScreen

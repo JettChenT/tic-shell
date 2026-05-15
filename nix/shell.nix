@@ -9,6 +9,7 @@
   clang-tools,
   fontconfig,
   freetype,
+  gst_all_1,
   gdk-pixbuf,
   glib,
   glibc,
@@ -36,6 +37,14 @@
 }:
 
 mkShell rec {
+  gstPluginInputs = [
+    gst_all_1.gst-plugins-base
+    gst_all_1.gst-plugins-good
+    gst_all_1.gst-plugins-bad
+    gst_all_1.gst-plugins-rs
+    gst_all_1.gst-libav
+  ];
+
   packages = [
     bun
     cargo
@@ -48,6 +57,7 @@ mkShell rec {
     quickshell
     rustc
     rustfmt
+    gst_all_1.gstreamer
   ];
 
   nativeBuildInputs = [
@@ -63,6 +73,7 @@ mkShell rec {
     freetype
     gdk-pixbuf
     glib
+  ] ++ gstPluginInputs ++ [
     gtk3
     libpulseaudio
     libxkbcommon
@@ -78,6 +89,7 @@ mkShell rec {
 
   env = {
     LD_LIBRARY_PATH = lib.makeLibraryPath buildInputs;
+    GST_PLUGIN_PATH = lib.makeSearchPath "lib/gstreamer-1.0" gstPluginInputs;
     LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
     BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${llvmPackages.libclang.lib}/lib/clang/${lib.versions.major llvmPackages.libclang.version}/include -isystem ${glibc.dev}/include";
   };

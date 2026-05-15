@@ -7,6 +7,7 @@ import "Helpers/LauncherNavigation.js" as LauncherNav
 
 import "Providers"
 import qs.Commons
+import qs.Modules.TicWorkspace
 import qs.Services.Keyboard
 import qs.Services.UI
 import qs.Widgets
@@ -148,6 +149,15 @@ Rectangle {
     target: LauncherProviderRegistry
     function onPluginProviderRegistryUpdated() {
       root.syncPluginProviders();
+    }
+  }
+
+  Connections {
+    target: TicWorkspaceState
+    function onWindowDescriptionRevisionChanged() {
+      if (root.isOpen) {
+        root.updateResults();
+      }
     }
   }
 

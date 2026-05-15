@@ -103,6 +103,7 @@ cargo run --manifest-path cua/Cargo.toml -- describe-workspace
 cargo run --manifest-path cua/Cargo.toml -- screenshot-window <window-id>
 cargo run --manifest-path cua/Cargo.toml -- click <window-id> <x> <y>
 cargo run --manifest-path cua/Cargo.toml -- type-text <window-id> "hello"
+cargo run --manifest-path cua/Cargo.toml -- press-key <window-id> Enter
 cargo run --manifest-path cua/Cargo.toml -- scroll <window-id> down 5
 ```
 

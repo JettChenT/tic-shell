@@ -206,6 +206,8 @@ Singleton {
       property string position: "left" // "top", "bottom", "left", or "right"
       property int ticWorkspaceWidth: 250
       property int ticAgentPaneWidth: 360
+      property bool ticWindowDescriptionOneLine: true
+      property real ticWindowPreviewBackdropOpacity: 0.72
       property list<string> monitors: [] // holds bar visibility per monitor
       property string density: "default" // "compact", "default", "comfortable"
       property bool showOutline: false
@@ -264,6 +266,9 @@ Singleton {
           property list<var> center: [
             {
               "id": "TicWorkspaceToggle"
+          },
+          {
+            "id": "TicDebug"
           },
           {
             "id": "Workspace"

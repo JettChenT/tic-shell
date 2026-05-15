@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tic-shell Rust Daemon and Heart Implementation</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121414;
+      --panel: #1b1f1e;
+      --panel-2: #232927;
+      --text: #eef3ef;
+      --muted: #a7b2aa;
+      --line: #3b4641;
+      --accent: #71d6b5;
+      --accent-2: #f0c36a;
+      --accent-3: #8ab4f8;
+      --danger: #ff8d7a;
+      --code: #101211;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 48px 28px 72px;
+    }
+
+    header {
+      margin-bottom: 34px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 26px;
+    }
+
+    h1, h2, h3 { line-height: 1.15; margin: 0; letter-spacing: 0; }
+
+    h1 {
+      font-size: clamp(30px, 4vw, 52px);
+      max-width: 850px;
+    }
+
+    h2 {
+      font-size: 24px;
+      margin: 42px 0 16px;
+    }
+
+    h3 {
+      font-size: 17px;
+      margin: 0 0 10px;
+      color: var(--accent);
+    }
+
+    p {
+      margin: 10px 0;
+      color: var(--muted);
+      max-width: 860px;
+    }
+
+    code {
+      background: var(--code);
+      color: var(--text);
+      border: 1px solid #2a312e;
+      border-radius: 5px;
+      padding: 1px 5px;
+      font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      overflow: auto;
+      background: var(--code);
+      border: 1px solid #2a312e;
+      border-radius: 8px;
+      padding: 14px;
+      color: #d7e7dd;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .subhead {
+      margin-top: 16px;
+      font-size: 18px;
+      max-width: 900px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 9px;
+      margin: 4px 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .tag strong { color: var(--text); font-weight: 600; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+      margin-top: 16px;
+    }
+
+    .node {
+      min-height: 96px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      padding: 14px;
+      position: relative;
+    }
+
+    .node::after {
+      content: ">";
+      position: absolute;
+      right: -14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--accent);
+      font: 700 20px/1 ui-monospace, monospace;
+    }
+
+    .node:last-child::after { content: ""; }
+
+    .node b {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    .node span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--text);
+      background: #202522;
+      font-weight: 650;
+    }
+
+    td { color: var(--muted); }
+    tr:last-child td { border-bottom: 0; }
+
+    .callout {
+      border-left: 4px solid var(--accent-2);
+      background: #211f18;
+      border-radius: 6px;
+      padding: 13px 15px;
+      margin-top: 18px;
+      color: #e7d7b0;
+    }
+
+    .callout strong { color: var(--accent-2); }
+
+    .sequence {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .num {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: #18352d;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .step-body {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px 14px;
+    }
+
+    .step-body b { color: var(--text); }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .mini-diagram {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+    }
+
+    .mini-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel-2);
+      min-height: 74px;
+    }
+
+    .arrow {
+      color: var(--accent);
+      font-weight: 800;
+      font-family: ui-monospace, monospace;
+    }
+
+    .status {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-right: 7px;
+    }
+
+    .warn { color: var(--danger); }
+
+    @media (max-width: 860px) {
+      main { padding: 32px 18px 56px; }
+      .span-4, .span-6, .span-8, .span-12 { grid-column: span 12; }
+      .flow, .two-col, .mini-diagram { grid-template-columns: 1fr; }
+      .node::after, .arrow { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>tic-shell Rust Daemon and Heart Implementation</h1>
+    <p class="subhead">
+      The Noctalia Codex pane now starts a Rust daemon that owns the shell-to-Codex bridge,
+      starts Codex ACP, exposes a daemon MCP server, and runs the first Heart heartbeat system
+      over niri/tiri window and workspace activity.
+    </p>
+    <div>
+      <span class="tag"><strong>Entrypoint</strong> <code>tic-daemon</code></span>
+      <span class="tag"><strong>Config</strong> <code>~/.tic/config.toml</code></span>
+      <span class="tag"><strong>Memory</strong> <code>~/.tic/memory/history/</code></span>
+      <span class="tag"><strong>MCP</strong> <code>tic-daemon mcp</code></span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Runtime Ownership</h2>
+    <p>
+      The process tree has been inverted from "QML starts Bun, Bun starts CUA MCP processes" to
+      "QML starts Rust, Rust starts Codex ACP, Codex sessions attach the daemon MCP".
+    </p>
+    <div class="flow" aria-label="Runtime process flow">
+      <div class="node">
+        <b>Noctalia QML</b>
+        <span><code>AgentBridge.qml</code> starts a process and speaks the existing line-delimited JSON UI protocol.</span>
+      </div>
+      <div class="node">
+        <b>tic-daemon</b>
+        <span>Loads config, starts UI writer, starts ACP bridge, starts Heart supervisor.</span>
+      </div>
+      <div class="node">
+        <b>codex-acp</b>
+        <span>Managed under <code>~/.tic/codex-acp</code> unless overridden.</span>
+      </div>
+      <div class="node">
+        <b>Codex Session</b>
+        <span>Per-workspace session with generated <code>AGENTS.md</code> and confined filesystem tools.</span>
+      </div>
+      <div class="node">
+        <b>Daemon MCP</b>
+        <span><code>tic-daemon mcp</code> exposes <code>emit_event</code> plus CUA compatibility tools.</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Implementation Map</h2>
+    <div class="grid">
+      <div class="card span-4">
+        <h3>Daemon Entrypoint</h3>
+        <p><code>tic-daemon/src/main.rs</code> dispatches between long-running daemon mode and MCP server mode.</p>
+        <p>Daemon mode loads config, starts ACP, starts Heart, and forwards QML stdin messages to the bridge.</p>
+      </div>
+      <div class="card span-4">
+        <h3>ACP Bridge</h3>
+        <p><code>tic-daemon/src/acp.rs</code> ports the core Bun bridge behavior into Rust.</p>
+        <p>It handles initialization, workspace sessions, prompts, permission auto-allow, snapshots, and filesystem confinement.</p>
+      </div>
+      <div class="card span-4">
+        <h3>Heart</h3>
+        <p><code>tic-daemon/src/heart.rs</code> owns the event bus and heartbeat loops.</p>
+        <p>It consumes niri events, cron ticks, screenshots, and emitted MCP updates.</p>
+      </div>
+      <div class="card span-4">
+        <h3>MCP Server</h3>
+        <p><code>tic-daemon/src/mcp.rs</code> exposes <code>emit_event</code> and CUA-compatible tools.</p>
+        <p>Current CUA tool bodies use a compatibility command path, while the crate split allows direct library calls next.</p>
+      </div>
+      <div class="card span-4">
+        <h3>CUA Split</h3>
+        <p><code>cua/src/lib.rs</code> now contains the previous implementation and <code>cua/src/main.rs</code> is a tiny CLI wrapper.</p>
+        <p>This makes the CUA code linkable from Rust consumers.</p>
+      </div>
+      <div class="card span-4">
+        <h3>Noctalia Wiring</h3>
+        <p><code>AgentBridge.qml</code> now runs <code>cargo run --quiet --bin tic-daemon</code> from <code>TIC_SHELL_ROOT</code>.</p>
+        <p>The QML message shape remains unchanged for the first migration.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Daemon Startup Flow</h2>
+    <div class="sequence">
+      <div class="step">
+        <div class="num">1</div>
+        <div class="step-body"><b>QML starts the daemon.</b> Noctalia launches <code>cargo run --quiet --bin tic-daemon</code> with <code>TIC_SHELL_ROOT</code>.</div>
+      </div>
+      <div class="step">
+        <div class="num">2</div>
+        <div class="step-body"><b>Config is loaded or created.</b> Defaults are written to <code>~/.tic/config.toml</code> if the file is absent.</div>
+      </div>
+      <div class="step">
+        <div class="num">3</div>
+        <div class="step-body"><b>Codex ACP starts.</b> The daemon uses <code>TIC_CODEX_ACP_COMMAND</code> or the managed <code>@zed-industries/codex-acp@0.13.0</code> install under <code>~/.tic/codex-acp</code>.</div>
+      </div>
+      <div class="step">
+        <div class="num">4</div>
+        <div class="step-body"><b>Workspace session is created.</b> The daemon sends <code>initialize</code>, then <code>session/new</code> with a generated workspace root and the daemon MCP server.</div>
+      </div>
+      <div class="step">
+        <div class="num">5</div>
+        <div class="step-body"><b>Heart starts in parallel.</b> The supervisor subscribes to niri event-stream, screenshot ticks, workspace interval ticks, and the MCP event log.</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Event Bus</h2>
+    <p>
+      Heart normalizes four categories of events. The abstraction is intentionally small so additional heartbeat loops can subscribe to the same bus later.
+    </p>
+    <div class="mini-diagram">
+      <div class="mini-box"><b>TiriEvent</b><br><span>Window and workspace lifecycle from niri event-stream.</span></div>
+      <div class="arrow">-></div>
+      <div class="mini-box"><b>Event Bus</b><br><span><code>mpsc</code> channel owned by <code>HeartSupervisor</code>.</span></div>
+      <div class="arrow">-></div>
+      <div class="mini-box"><b>Heartbeat State</b><br><span>L1 windows and L2 workspaces update buffers and trigger Codex tasks.</span></div>
+    </div>
+    <table>
+      <thead>
+      <tr><th>Variant</th><th>Producer</th><th>Consumer Logic</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>Event::TiriEvent</code></td>
+        <td><code>niri msg --json event-stream</code></td>
+        <td>Creates, updates, and closes window/workspace heartbeat state.</td>
+      </tr>
+      <tr>
+        <td><code>Event::Cron</code></td>
+        <td>Tokio interval tasks</td>
+        <td>Drives screenshot ticks and L2 workspace interval triggers.</td>
+      </tr>
+      <tr>
+        <td><code>Event::Screenshot</code></td>
+        <td>Screenshot cron plus <code>cua-screenshot-window</code></td>
+        <td>Feeds L1 screenshot buffers after perceptual-difference filtering.</td>
+      </tr>
+      <tr>
+        <td><code>Event::HeartUpdate</code></td>
+        <td><code>emit_event</code> MCP tool writing <code>~/.tic/events.jsonl</code></td>
+        <td>Feeds L1 output into L2 workspace heartbeat state.</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>L1 Window Heartbeat</h2>
+    <div class="two-col">
+      <div class="card">
+        <h3>State</h3>
+        <p>Each tracked niri window has a <code>WindowHeartbeat</code> with the latest window metadata, accepted screenshot buffer, trigger counters, timestamps, and previous perceptual hash.</p>
+        <pre>WindowHeartbeat {
+  window,
+  buffer,
+  accepted_since_trigger,
+  initialized,
+  started,
+  last_trigger,
+  last_hash,
+}</pre>
+      </div>
+      <div class="card">
+        <h3>Trigger Logic</h3>
+        <p>Initial trigger fires after <code>10</code> accepted screenshots or <code>20s</code>. Ongoing trigger fires after <code>30</code> accepted screenshots or <code>60s</code>. Close trigger fires on <code>WindowClosed</code>.</p>
+        <p>All values are defaults from config, not hardcoded policy.</p>
+      </div>
+    </div>
+    <table>
+      <thead>
+      <tr><th>Step</th><th>Behavior</th><th>Result</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>Observe window</td>
+        <td><code>WindowOpenedOrChanged</code> or initial bootstrap calls <code>ensure_window</code>.</td>
+        <td>L1 state exists for the window id.</td>
+      </tr>
+      <tr>
+        <td>Capture screenshot</td>
+        <td>Screenshot cron writes a PNG through compositor-native <code>cua-screenshot-window</code>.</td>
+        <td><code>Event::Screenshot</code> enters the Heart bus.</td>
+      </tr>
+      <tr>
+        <td>Filter</td>
+        <td><code>img_hash</code> compares the new image to <code>last_hash</code>.</td>
+        <td>Insignificant screenshots are deleted and not buffered.</td>
+      </tr>
+      <tr>
+        <td>Buffer</td>
+        <td>Accepted screenshots are capped by <code>buffer_max</code>, default <code>100</code>.</td>
+        <td>Overflow images are dropped and removed from disk.</td>
+      </tr>
+      <tr>
+        <td>Prompt Codex</td>
+        <td>Daemon sends a Heart prompt to a <code>heart:window:&lt;id&gt;</code> ACP session.</td>
+        <td>Codex updates a <code>10min-window-summary.md</code> file and calls <code>emit_event</code>.</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>L2 Workspace Heartbeat</h2>
+    <p>
+      L2 aggregates L1 window updates for each workspace. The first update from any window triggers immediately, the interval trigger defaults to <code>60min</code>, and close triggers finalize the workspace summary.
+    </p>
+    <div class="flow" aria-label="L2 workspace flow">
+      <div class="node">
+        <b>L1 Codex</b>
+        <span>Writes window summary and calls <code>emit_event</code>.</span>
+      </div>
+      <div class="node">
+        <b>events.jsonl</b>
+        <span>Daemon MCP appends structured event lines.</span>
+      </div>
+      <div class="node">
+        <b>Event Tailer</b>
+        <span>Heart reads new log lines and emits <code>HeartUpdate</code>.</span>
+      </div>
+      <div class="node">
+        <b>L2 State</b>
+        <span>Workspace buffers pending updates and tracks first seen windows.</span>
+      </div>
+      <div class="node">
+        <b>L2 Codex</b>
+        <span>Updates <code>60min-workspace-summary.md</code> and emits <code>workspace_heartbeat_l2_update</code>.</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Configuration Surface</h2>
+    <p>
+      The daemon creates this TOML file on first run. Constants from the Heart spec are expressed as defaults so runtime behavior can be tuned without code changes.
+    </p>
+    <pre>[daemon]
+data_root = "/home/jettc/.tic"
+memory_root = "/home/jettc/.tic/memory"
+workdir_root = "/run/user/1000/tic-shell/codex-workspaces"
+
+[heartbeat.window-l1]
+enabled = true
+screenshot_interval = "2s"
+initial_screenshot_count = 10
+initial_timeout = "20s"
+ongoing_screenshot_count = 30
+buffer_max = 100
+summary_duration_label = "10min"
+
+[heartbeat.window-l1.ongoing]
+interval = "60s"
+
+[heartbeat.workspace-l2]
+enabled = true
+interval = "60min"
+summary_duration_label = "60min"
+
+[heartbeat.screenshot-diff]
+enabled = true
+algorithm = "gradient-hash"
+threshold = 8</pre>
+  </section>
+
+  <section>
+    <h2>Current Verification</h2>
+    <div class="grid">
+      <div class="card span-6">
+        <h3><span class="status"></span>Build and Tests</h3>
+        <p><code>cargo check --workspace</code> passes.</p>
+        <p><code>cargo check --manifest-path cua/Cargo.toml</code> passes.</p>
+        <p><code>cargo test -p tic-daemon</code> passes with 5 tests.</p>
+      </div>
+      <div class="card span-6">
+        <h3><span class="status"></span>Live Runtime</h3>
+        <p>Noctalia is running from <code>shell/noctalia</code>.</p>
+        <p><code>tic-daemon</code> is a child of Quickshell, and <code>codex-acp</code> is a child of <code>tic-daemon</code>.</p>
+        <p>Layer surfaces still include <code>tic-workspace-eDP-1</code> and <code>tic-workspace-exclusion-left-eDP-1</code>.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Known implementation boundary:</strong>
+      the daemon MCP currently exposes CUA tools through a compatibility command path. The <code>cua</code> code has been moved into a library-capable shape, so the next tightening step is to call those routines directly from <code>tic-daemon</code> instead of shelling through the CLI.
+    </div>
+  </section>
+
+  <section>
+    <h2>Operational Commands</h2>
+    <table>
+      <thead>
+      <tr><th>Command</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+      <tr><td><code>just daemon</code></td><td>Run the Rust daemon manually from the repo root.</td></tr>
+      <tr><td><code>just test-daemon</code></td><td>Run daemon unit tests.</td></tr>
+      <tr><td><code>just restart-daemon</code></td><td>Restart the shell-owned daemon by restarting Noctalia.</td></tr>
+      <tr><td><code>cargo run --bin tic-daemon mcp --event-log ~/.tic/events.jsonl</code></td><td>Run only the daemon MCP server in stdio mode.</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

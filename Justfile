@@ -43,6 +43,19 @@ hide-sidebar:
 toggle-agent:
     TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar toggle-agent
 
+# Run the Rust tic daemon directly for development.
+daemon:
+    TIC_SHELL_ROOT="$PWD" cargo run --bin tic-daemon
+
+# Run daemon unit tests.
+test-daemon:
+    cargo test -p tic-daemon
+
+# Restart the shell-owned daemon by restarting the Noctalia sidebar.
+restart-daemon:
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar stop
+    TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-{{tic_quickshell_bin}}}" bin/tic-sidebar start
+
 # Run the Bun ACP bridge tests.
 test-agent:
     bun test tests/tic-codex-agent.test.mjs

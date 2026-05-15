@@ -7,6 +7,8 @@ Singleton {
   id: root
 
   signal promptRequested
+  signal promptOpened
+  signal promptCanceled
   signal promptSubmitted(string prompt)
 
   function requestPrompt() {
@@ -19,5 +21,13 @@ Singleton {
       return;
     }
     promptSubmitted(trimmed);
+  }
+
+  function notifyPromptOpened() {
+    promptOpened();
+  }
+
+  function cancelPrompt() {
+    promptCanceled();
   }
 }

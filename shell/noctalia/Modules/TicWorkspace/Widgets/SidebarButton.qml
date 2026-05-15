@@ -1,9 +1,12 @@
 import QtQuick
+import qs.Services.UI
 
 Rectangle {
   id: root
 
   property string label: ""
+  property string tooltipText: ""
+  property string tooltipDirection: "right"
   property color labelColor: "#fff59b"
   property int labelSize: 14
   property int labelWeight: Font.Normal
@@ -33,5 +36,11 @@ Rectangle {
     anchors.fill: parent
     hoverEnabled: true
     onClicked: root.clicked()
+    onEntered: {
+      if (root.tooltipText.length > 0) {
+        TooltipService.show(root, root.tooltipText, root.tooltipDirection);
+      }
+    }
+    onExited: TooltipService.hide()
   }
 }

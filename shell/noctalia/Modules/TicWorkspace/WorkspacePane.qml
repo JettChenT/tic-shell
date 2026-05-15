@@ -30,6 +30,42 @@ Item {
     return "#4cc9f0";
   }
 
+  function labelForForkSession(forkSession) {
+    const status = String(forkSession?.status || "");
+    const message = String(forkSession?.statusMessage || "").toLowerCase();
+    if (status === "error") {
+      return "!";
+    }
+    if (status === "done") {
+      return "D";
+    }
+    if (status === "queued" || status === "prompting") {
+      return "Q";
+    }
+    if (message.indexOf("click") !== -1) {
+      return "C";
+    }
+    if (message.indexOf("scroll") !== -1) {
+      return "S";
+    }
+    if (message.indexOf("typ") !== -1) {
+      return "T";
+    }
+    if (message.indexOf("press") !== -1 || message.indexOf("key") !== -1) {
+      return "K";
+    }
+    if (message.indexOf("look") !== -1) {
+      return "L";
+    }
+    return "R";
+  }
+
+  function tooltipForForkSession(forkSession) {
+    const title = String(forkSession?.title || "Fork cursor");
+    const status = String(forkSession?.statusMessage || forkSession?.status || "");
+    return status.length > 0 ? title + "\n" + status : title;
+  }
+
   Column {
     anchors.fill: parent
     anchors.margins: root.shell.sidebarCollapsed ? 5 : 8
@@ -61,17 +97,41 @@ Item {
         Repeater {
           model: (root.shell.forkSessions || []).slice().reverse()
 
-          Widgets.SidebarButton {
+          Row {
             property var forkSession: modelData
 
-            label: forkSession.status === "error" ? "!" : "C"
-            labelSize: 12
-            labelWeight: Font.DemiBold
-            labelColor: forkSession.status === "done" ? root.shell.mOnSurfaceVariant : root.shell.mOnPrimary
-            backgroundColor: forkSession.status === "error" ? root.shell.mError : root.colorForCursorTheme(forkSession.cursorTheme)
-            hoverColor: root.shell.capsuleHoverColor
-            borderColor: forkSession.selected ? root.shell.mPrimary : root.shell.mOutline
-            onClicked: root.shell.selectForkSession(forkSession)
+            height: parent.height
+            spacing: 2
+
+            Widgets.SidebarButton {
+              label: root.labelForForkSession(forkSession)
+              labelSize: 12
+              labelWeight: Font.DemiBold
+              labelColor: forkSession.status === "done" ? root.shell.mOnSurfaceVariant : root.shell.mOnPrimary
+              backgroundColor: forkSession.status === "error" ? root.shell.mError : root.colorForCursorTheme(forkSession.cursorTheme)
+              hoverColor: root.shell.capsuleHoverColor
+              borderColor: forkSession.selected ? root.shell.mPrimary : root.shell.mOutline
+              tooltipText: root.tooltipForForkSession(forkSession)
+              tooltipDirection: "bottom"
+              onClicked: root.shell.selectForkSession(forkSession)
+            }
+
+            Widgets.SidebarButton {
+              width: 20
+              height: 20
+              anchors.verticalCenter: parent.verticalCenter
+              radius: 7
+              label: "x"
+              labelSize: 11
+              labelWeight: Font.DemiBold
+              labelColor: root.shell.mOnSurfaceVariant
+              backgroundColor: root.shell.capsuleColor
+              hoverColor: Qt.alpha(root.shell.mError, 0.18)
+              borderColor: root.shell.mOutline
+              tooltipText: "Dismiss " + (forkSession.title || "fork cursor")
+              tooltipDirection: "bottom"
+              onClicked: root.shell.dismissForkSession(forkSession)
+            }
           }
         }
       }
@@ -94,7 +154,7 @@ Item {
     Flickable {
       id: workspaceScroller
 
-      visible: !root.shell.sidebarCollapsed
+      visible: !root.shell.sidebarCollapsed && !root.shell.debugPaneOpen
       width: parent.width
       height: Math.max(0, parent.height - headerRow.height - 8)
       clip: true
@@ -121,6 +181,13 @@ Item {
           }
         }
       }
+    }
+
+    DebugPane {
+      shell: root.shell
+      visible: !root.shell.sidebarCollapsed && root.shell.debugPaneOpen
+      width: parent.width
+      height: Math.max(0, parent.height - headerRow.height - 8)
     }
   }
 }

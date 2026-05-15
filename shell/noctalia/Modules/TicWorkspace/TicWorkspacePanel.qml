@@ -23,8 +23,6 @@ Item {
   readonly property int expandedRailWidth: TicWorkspaceState.expandedWidth()
   readonly property int railWidth: TicWorkspaceState.reservedWidth()
   readonly property string ticShellRoot: Quickshell.env("TIC_SHELL_ROOT") || (Quickshell.env("HOME") + "/dev/tic-shell")
-  readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/lnx"
-  readonly property string stateFile: stateDir + "/workspaces.json"
 
   readonly property color mPrimary: Color.mPrimary
   readonly property color mOnPrimary: Color.mOnPrimary
@@ -56,11 +54,18 @@ Item {
   readonly property bool stateReady: annotationStore.ready
   readonly property string agentStatus: agentBridge.status
   readonly property var agentCommands: agentBridge.commands
+  readonly property var debugSnapshot: agentBridge.debugSnapshot
+  readonly property var windowDescriptions: TicWorkspaceState.windowDescriptions
+  readonly property int windowDescriptionRevision: TicWorkspaceState.windowDescriptionRevision
+  readonly property bool windowDescriptionsOneLine: Settings.data.bar.ticWindowDescriptionOneLine !== false
 
   property bool sidebarCollapsed: TicWorkspaceState.collapsed
   property bool agentPaneCollapsed: TicWorkspaceState.agentPaneCollapsed
+  property bool debugPaneOpen: TicWorkspaceState.debugPaneOpen
   property int slashCommandIndex: 0
   property int referenceIndex: 0
+  property var pendingForkCursorWindow: null
+  property string pendingForkCursorId: ""
 
   implicitWidth: railWidth
   implicitHeight: Math.max(280, Math.min(720, screen ? Math.round(screen.height * 0.58) : 560))
@@ -88,8 +93,46 @@ Item {
     return null;
   }
 
+  function forkWindowSnapshot(windowRow) {
+    if (!windowRow) {
+      return null;
+    }
+    return {
+      id: windowRow.id || 0,
+      title: windowRow.title || "",
+      appId: windowRow.appId || windowRow.app_id || "",
+      workspaceId: windowRow.workspaceId || windowRow.workspace_id || 0,
+      focused: true
+    };
+  }
+
+  function beginForkCursorPrompt() {
+    pendingForkCursorId = "fork-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    pendingForkCursorWindow = forkWindowSnapshot(currentFocusedWindow());
+    TicServices.ForkCursorService.requestPrompt();
+  }
+
+  function prepareForkCursorSession() {
+    if (!pendingForkCursorId || pendingForkCursorId.length === 0) {
+      return;
+    }
+    agentBridge.prepareForkCursor(pendingForkCursorId, pendingForkCursorWindow);
+  }
+
   function sendForkCursorPrompt(prompt) {
-    agentBridge.sendForkCursorPrompt(prompt, currentFocusedWindow());
+    const forkId = pendingForkCursorId;
+    const targetWindow = pendingForkCursorWindow || forkWindowSnapshot(currentFocusedWindow());
+    pendingForkCursorId = "";
+    pendingForkCursorWindow = null;
+    agentBridge.sendForkCursorPrompt(forkId, prompt, targetWindow);
+  }
+
+  function cancelForkCursorPrompt() {
+    if (pendingForkCursorId && pendingForkCursorId.length > 0) {
+      agentBridge.dismissFork(pendingForkCursorId);
+    }
+    pendingForkCursorId = "";
+    pendingForkCursorWindow = null;
   }
 
   function selectForkSession(fork) {
@@ -101,6 +144,13 @@ Item {
     if (fork.windowId) {
       workspaceService.focusWindow({ id: fork.windowId });
     }
+  }
+
+  function dismissForkSession(fork) {
+    if (!fork) {
+      return;
+    }
+    agentBridge.dismissFork(fork.id || "");
   }
 
   function sendAgentControl(type) {
@@ -282,6 +332,10 @@ Item {
     return workspaceService.windowTitle(windowId, revision);
   }
 
+  function windowDescription(windowId, revision) {
+    return workspaceService.windowDescription(windowId, revision);
+  }
+
   function windowFocused(windowId, revision) {
     return workspaceService.windowFocused(windowId, revision);
   }
@@ -328,6 +382,7 @@ Item {
     if (!TicWorkspaceState.collapsed && !TicWorkspaceState.agentPaneCollapsed) {
       deactivateAgentSession();
     }
+    TicWorkspaceState.debugPaneOpen = false;
     TicWorkspaceState.collapsed = true;
     scheduleRecenter();
   }
@@ -337,10 +392,14 @@ Item {
     if (TicWorkspaceState.collapsed && !TicWorkspaceState.agentPaneCollapsed) {
       deactivateAgentSession();
     }
+    if (TicWorkspaceState.collapsed) {
+      TicWorkspaceState.debugPaneOpen = false;
+    }
     scheduleRecenter();
   }
 
   function showAgentPane() {
+    TicWorkspaceState.debugPaneOpen = false;
     TicWorkspaceState.agentPaneCollapsed = false;
     scheduleRecenter();
   }
@@ -354,10 +413,26 @@ Item {
   }
 
   function toggleAgentPane() {
+    TicWorkspaceState.debugPaneOpen = false;
     TicWorkspaceState.toggleAgentPane();
     if (TicWorkspaceState.agentPaneCollapsed) {
       deactivateAgentSession();
     }
+    scheduleRecenter();
+  }
+
+  function showDebugPane() {
+    TicWorkspaceState.showDebugPane();
+    scheduleRecenter();
+  }
+
+  function hideDebugPane() {
+    TicWorkspaceState.hideDebugPane();
+    scheduleRecenter();
+  }
+
+  function toggleDebugPane() {
+    TicWorkspaceState.toggleDebugPane();
     scheduleRecenter();
   }
 
@@ -366,7 +441,6 @@ Item {
   }
 
   Component.onCompleted: {
-    Quickshell.execDetached(["mkdir", "-p", stateDir]);
     agentBridge.events = [];
   }
 
@@ -380,11 +454,13 @@ Item {
 
   TicServices.AnnotationStore {
     id: annotationStore
-    stateFile: root.stateFile
   }
 
   TicServices.WorkspaceService {
     id: workspaceService
+    windowDescriptions: TicWorkspaceState.windowDescriptions
+    windowDescriptionRevision: TicWorkspaceState.windowDescriptionRevision
+    windowPreviewBackdropOpacity: Settings.data.bar.ticWindowPreviewBackdropOpacity
 
     onAgentWorkspaceChanged: {
       root.activeWorkspaceLabel = workspaceService.activeWorkspaceLabel;
@@ -399,6 +475,7 @@ Item {
     workspaceKey: root.currentAgentWorkspaceKey()
     workspaceTitle: root.activeWorkspaceLabel
     onWorkspaceMessage: title => root.activeWorkspaceLabel = title
+    onWorkspaceNameSet: (workspaceId, name) => root.setAnnotation(workspaceId, name)
     onForkComplete: (status, title, body) => {
       if (status === "done") {
         ToastService.showNotice(title, body, "mouse", 3000);
@@ -411,8 +488,16 @@ Item {
   Connections {
     target: TicServices.ForkCursorService
 
+    function onPromptOpened() {
+      root.prepareForkCursorSession();
+    }
+
     function onPromptSubmitted(prompt) {
       root.sendForkCursorPrompt(prompt);
+    }
+
+    function onPromptCanceled() {
+      root.cancelForkCursorPrompt();
     }
   }
 
@@ -451,8 +536,12 @@ Item {
       root.hideAgentPane();
     }
 
+    function toggleDebug() {
+      root.toggleDebugPane();
+    }
+
     function forkCursor() {
-      TicServices.ForkCursorService.requestPrompt();
+      root.beginForkCursorPrompt();
     }
   }
 
@@ -475,5 +564,10 @@ Item {
     Tic.AgentPane {
       shell: root
     }
+  }
+
+  Tic.ForkCursorStatusOverlays {
+    screen: root.screen
+    forkSessions: root.forkSessions
   }
 }

@@ -11,10 +11,13 @@ Item {
   property int windowRevision: 0
   property var windowStructureRows: []
   property int windowStructureRevision: 0
+  property real windowPreviewBackdropOpacity: 0.72
   property string lastWorkspaceRowsJson: ""
   property string lastWindowStructureRowsJson: ""
   property int activeWorkspaceId: -1
   property string activeWorkspaceLabel: "Workspace"
+  property var windowDescriptions: ({})
+  property int windowDescriptionRevision: 0
 
   signal agentWorkspaceChanged
 
@@ -53,6 +56,16 @@ Item {
   function windowTitle(windowId, revision) {
     const win = windowById(windowId);
     return win ? win.title : "(untitled)";
+  }
+
+  function windowDescription(windowId, revision) {
+    const win = windowById(windowId);
+    return win ? win.description : "";
+  }
+
+  function descriptionFor(windowId) {
+    const entry = windowDescriptions[String(windowId)];
+    return entry && entry.description ? entry.description : "";
   }
 
   function windowFocused(windowId, revision) {
@@ -110,6 +123,7 @@ Item {
       title: win.title || "(untitled)",
       appId: win.appId || "",
       workspaceId: win.workspaceId || -1,
+      description: descriptionFor(win.id),
       focused: win.focused,
       floating: win.isFloating,
       positionX: win.positionX,
@@ -167,6 +181,7 @@ Item {
       key: win.key,
       appId: win.appId,
       workspaceId: win.workspaceId,
+      description: win.description,
       floating: win.floating,
       positionX: win.positionX,
       positionY: win.positionY
@@ -239,9 +254,14 @@ Item {
       "--x", String(previewX),
       "--y", String(previewY),
       "--width", String(previewWidth),
-      "--height", String(previewHeight)
+      "--height", String(previewHeight),
+      "--backdrop-opacity", String(Math.max(0, Math.min(1, root.windowPreviewBackdropOpacity))),
+      "--description", windowRow.description || ""
     ]);
   }
+
+  onWindowDescriptionsChanged: refreshState()
+  onWindowDescriptionRevisionChanged: refreshState()
 
   function hideWindowPreview() {
     Niri.dispatch(["hide-window-preview"]);
@@ -273,4 +293,5 @@ Item {
       refreshState();
     }
   }
+
 }

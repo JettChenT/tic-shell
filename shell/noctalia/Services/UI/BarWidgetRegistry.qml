@@ -37,6 +37,7 @@ Singleton {
                            "Spacer": spacerComponent,
                            "SystemMonitor": systemMonitorComponent,
                            "Taskbar": taskbarComponent,
+                           "TicDebug": ticDebugComponent,
                            "TicWorkspaceToggle": ticWorkspaceToggleComponent,
                            "Tray": trayComponent,
                            "Volume": volumeComponent,
@@ -418,6 +419,9 @@ Singleton {
   }
   property Component ticWorkspaceToggleComponent: Component {
     TicWorkspaceToggle {}
+  }
+  property Component ticDebugComponent: Component {
+    TicDebug {}
   }
   function init() {
     Logger.i("BarWidgetRegistry", "Service started");
