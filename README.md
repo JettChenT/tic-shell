@@ -15,13 +15,6 @@ The project is intentionally small and local-first. Most runtime behavior assume
 bin/
   tic-sidebar          Quickshell launcher and IPC wrapper
   tic-codex-agent     Bun bridge between the sidebar and a Codex ACP adapter
-crates/
-  app/                legacy GPUI application entrypoint
-  shell-sidebar/      legacy GPUI workspace rail and Codex rail
-  services/           niri workspace/window state and actions
-  agent/              typed Rust wrapper around the Codex ACP bridge process
-  persistence/        workspace annotation persistence
-  ui/                 shared sidebar theme and sizing
 cua/
   Cargo.toml          Rust CLI package
   src/main.rs         niri computer-use implementation
@@ -43,7 +36,7 @@ docs/
 Runtime requirements depend on the component:
 
 - `bun` for `bin/tic-codex-agent` and its tests
-- `cargo`/Rust for the legacy GPUI crates and the `cua` CLI
+- `cargo`/Rust for the `cua` CLI
 - `qs` or `quickshell` for the QML sidebar
 - `niri` for compositor IPC
 - `codex-acp`, or `bunx` to run `@zed-industries/codex-acp`
@@ -125,5 +118,5 @@ If the process is outside the compositor environment, set `NIRI_SOCKET`, `XDG_RU
 
 - The sidebar uses a layer-shell exclusive zone as its reservation source. Do not pair it with a niri left strut, because that double-reserves horizontal space.
 - Workspace annotations are persisted at `~/.local/state/lnx/workspaces.json`.
-- `TIC_SHELL_ROOT` can point the Rust sidebar at a different repo checkout.
+- `TIC_SHELL_ROOT` can point the QML sidebar at a different repo checkout.
 - `TIC_CODEX_WORKDIR` controls the filesystem root exposed by the ACP bridge. The bridge rejects file reads/writes outside that root.

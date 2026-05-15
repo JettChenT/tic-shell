@@ -10,7 +10,7 @@ Repo-specific instructions for future coding agents working in `tic-shell`.
 - `bin/tic-codex-agent` is an executable Bun script used by the Codex pane. It also exports `createClient` for tests.
 - `tests/tic-codex-agent.test.mjs` runs under `bun test` and imports `bin/tic-codex-agent` directly.
 - `cua/` is a standalone Rust package for niri computer-use actions.
-- `crates/` contains the older Rust/GPUI direction and shared Rust work. Treat it as secondary unless the task explicitly targets it.
+- Shell UI work belongs under `shell/`; Rust code is limited to `cua/` unless a task explicitly adds otherwise.
 
 ## Local Commands
 
