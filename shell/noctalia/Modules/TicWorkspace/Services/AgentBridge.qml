@@ -11,8 +11,10 @@ Item {
   property var events: []
   property string status: "starting"
   property var commands: []
+  property var forkSessions: []
 
   signal workspaceMessage(string title)
+  signal forkComplete(string status, string title, string body)
 
   function appendEvent(kind, title, body) {
     const next = events.slice();
@@ -54,6 +56,10 @@ Item {
         workspaceMessage(message.title || workspaceTitle);
       } else if (message.type === "event") {
         appendEvent(message.kind || "system", message.title || "Agent", message.body || "");
+      } else if (message.type === "forkSessions") {
+        forkSessions = message.sessions || [];
+      } else if (message.type === "forkComplete") {
+        forkComplete(message.status || "done", message.title || "Fork cursor", message.body || "");
       }
     } catch (error) {
       appendEvent("stderr", "codex-agent", trimmed);
@@ -86,6 +92,32 @@ Item {
       text: trimmed,
       workspaceKey: workspaceKey,
       workspaceTitle: workspaceTitle
+    });
+  }
+
+  function sendForkCursorPrompt(prompt, activeWindow) {
+    const trimmed = prompt.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+
+    writeMessage({
+      type: "fork-cursor",
+      text: trimmed,
+      workspaceKey: workspaceKey,
+      workspaceTitle: workspaceTitle,
+      activeWindow: activeWindow || null
+    });
+  }
+
+  function selectFork(id) {
+    if (!id || id.length === 0) {
+      return;
+    }
+
+    writeMessage({
+      type: "select-fork",
+      id: id
     });
   }
 

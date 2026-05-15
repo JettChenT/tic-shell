@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Modules.TicWorkspace
 import qs.Modules.TicWorkspace as Tic
 import qs.Modules.TicWorkspace.Services as TicServices
+import qs.Services.UI
 
 Item {
   id: root
@@ -44,6 +45,7 @@ Item {
 
   readonly property var annotations: annotationStore.annotations
   readonly property var agentEvents: agentBridge.events
+  readonly property var forkSessions: agentBridge.forkSessions
   readonly property var workspaceRows: workspaceService.workspaceRows
   readonly property var windowRows: workspaceService.windowRows
   readonly property int windowRevision: workspaceService.windowRevision
@@ -74,6 +76,31 @@ Item {
 
   function sendAgentPrompt(prompt) {
     agentBridge.sendPrompt(prompt);
+  }
+
+  function currentFocusedWindow() {
+    const rows = windowRows || [];
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].focused) {
+        return rows[i];
+      }
+    }
+    return null;
+  }
+
+  function sendForkCursorPrompt(prompt) {
+    agentBridge.sendForkCursorPrompt(prompt, currentFocusedWindow());
+  }
+
+  function selectForkSession(fork) {
+    if (!fork) {
+      return;
+    }
+    agentBridge.selectFork(fork.id || "");
+    showAgentPane();
+    if (fork.windowId) {
+      workspaceService.focusWindow({ id: fork.windowId });
+    }
   }
 
   function sendAgentControl(type) {
@@ -372,6 +399,21 @@ Item {
     workspaceKey: root.currentAgentWorkspaceKey()
     workspaceTitle: root.activeWorkspaceLabel
     onWorkspaceMessage: title => root.activeWorkspaceLabel = title
+    onForkComplete: (status, title, body) => {
+      if (status === "done") {
+        ToastService.showNotice(title, body, "mouse", 3000);
+      } else {
+        ToastService.showWarning(title, body, 5000);
+      }
+    }
+  }
+
+  Connections {
+    target: TicServices.ForkCursorService
+
+    function onPromptSubmitted(prompt) {
+      root.sendForkCursorPrompt(prompt);
+    }
   }
 
   Timer {
@@ -407,6 +449,10 @@ Item {
 
     function hideAgent() {
       root.hideAgentPane();
+    }
+
+    function forkCursor() {
+      TicServices.ForkCursorService.requestPrompt();
     }
   }
 

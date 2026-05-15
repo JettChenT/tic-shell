@@ -28,6 +28,7 @@ import qs.Modules.OSD
 import qs.Modules.Panels.Launcher
 import qs.Modules.Panels.Settings
 import qs.Modules.Toast
+import qs.Modules.TicWorkspace as Tic
 import qs.Services.Control
 import qs.Services.Hardware
 import qs.Services.Keyboard
@@ -153,6 +154,10 @@ ShellRoot {
       // Shared screen detector for IPC and plugins
       CurrentScreenDetector {
         id: screenDetector
+      }
+
+      Tic.ForkCursorPrompt {
+        screenDetector: screenDetector
       }
 
       // IPCService is a singleton, initialized via init() in deferred services block

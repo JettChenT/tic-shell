@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -42,11 +42,131 @@ function destroyVirtualCursorDefault(cursorId) {
   }
 }
 
+function listCursorThemesDefault() {
+  const cursorRoot = path.join(os.homedir(), "dev", "tiri", "resources", "cursors");
+  try {
+    return readdirSync(cursorRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith("Tiri-CUA"))
+      .map(entry => entry.name)
+      .sort();
+  } catch {
+    return ["Tiri-CUA"];
+  }
+}
+
+function niriJson(args) {
+  const niri = resolveCommand("niri");
+  const result = spawnSync(niri, ["msg", "--json", ...args], {
+    encoding: "utf8",
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || `niri exited ${result.status}`).trim());
+  }
+  return JSON.parse(result.stdout.trim());
+}
+
+function overlayPointerFromRect(overlay) {
+  const rect = overlay?.resolved_rect || overlay?.resolvedRect;
+  const placement = overlay?.placement || {};
+  if (!rect) {
+    return null;
+  }
+  const gap = Number(placement.gap ?? 10);
+  const side = String(placement.side || "Right").toLowerCase();
+  const align = String(placement.align || "Center").toLowerCase();
+  let x = Number(rect.x);
+  let y = Number(rect.y);
+
+  if (side === "left") {
+    x += Number(rect.width) + gap;
+  } else if (side === "above") {
+    x += align === "end" ? Number(rect.width) : align === "center" ? Number(rect.width) / 2 : 0;
+    y += Number(rect.height) + gap;
+  } else if (side === "below") {
+    x += align === "end" ? Number(rect.width) : align === "center" ? Number(rect.width) / 2 : 0;
+    y -= gap;
+  } else {
+    x -= gap;
+  }
+
+  if (side === "left" || side === "right") {
+    if (align === "end") {
+      y += Number(rect.height);
+    } else if (align === "center") {
+      y += Number(rect.height) / 2;
+    }
+  }
+
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+function windowOriginFromLayout(window) {
+  const layout = window?.layout || {};
+  const tilePos = layout.tile_pos_in_workspace_view || layout.tilePosInWorkspaceView || [0, 0];
+  const offset = layout.window_offset_in_tile || layout.windowOffsetInTile || [0, 0];
+  return {
+    x: Number(tilePos[0] || 0) + Number(offset[0] || 0),
+    y: Number(tilePos[1] || 0) + Number(offset[1] || 0),
+  };
+}
+
+function createForkVirtualCursorDefault({ cursorId, cursorTheme, activeWindow }) {
+  const windowId = Number(activeWindow?.id || 0);
+  if (!windowId) {
+    throw new Error("no active window to fork cursor into");
+  }
+
+  let x = 0;
+  let y = 0;
+  try {
+    const overlays = niriJson(["cursor-overlays"]);
+    const overlay = Array.isArray(overlays)
+      ? overlays.find(item => item.overlay_id === "tic-fork-cursor-prompt" || item.overlayId === "tic-fork-cursor-prompt")
+      : null;
+    const pointer = overlayPointerFromRect(overlay);
+    const windows = niriJson(["windows"]);
+    const window = Array.isArray(windows) ? windows.find(item => Number(item.id) === windowId) : null;
+    if (pointer && window) {
+      const origin = windowOriginFromLayout(window);
+      x = Math.max(0, Math.round(pointer.x - origin.x));
+      y = Math.max(0, Math.round(pointer.y - origin.y));
+    }
+  } catch (err) {
+    appendAdapterLog(`fork cursor position fallback: ${err?.message || String(err)}`);
+  }
+
+  const cursor = niriJson([
+    "create-virtual-cursor",
+    "--cursor-id",
+    cursorId,
+    "--window-id",
+    String(windowId),
+    "--x",
+    String(x),
+    "--y",
+    String(y),
+    "--cursor-theme",
+    cursorTheme,
+    "--cursor-icon",
+    "left_ptr",
+    "--size",
+    "32",
+    "--duration-ms",
+    "0",
+    "--replace-existing",
+  ]);
+  return { window_id: windowId, x, y, cursor };
+}
+
 function createClient({
   child,
   emitMessage = emit,
   workspaceRoot = defaultWorkspaceRoot,
   destroyVirtualCursor = destroyVirtualCursorDefault,
+  listCursorThemes = listCursorThemesDefault,
+  createForkVirtualCursor = createForkVirtualCursorDefault,
 }) {
 let nextId = 1;
 let nextEntryId = 1;
@@ -57,6 +177,7 @@ let activeWorkspaceKey = "workspace:default";
 let activeWorkspaceTitle = "Workspace";
 const workspaces = new Map();
 const sessionsById = new Map();
+const forkSessions = new Map();
 const localCommands = [
   { name: "clear", description: "Clear this workspace session" },
   { name: "new", description: "Start a new session for this workspace" },
@@ -82,6 +203,7 @@ function createWorkspace(key = activeWorkspaceKey, title = activeWorkspaceTitle)
     tools: new Map(),
     cuaCursorIds: new Set(),
     availableCommands: [],
+    fork: null,
   };
 }
 
@@ -144,12 +266,28 @@ function emitWorkspace() {
   });
 }
 
+function emitForkSessions() {
+  const sessions = Array.from(forkSessions.values()).map(state => ({
+    id: state.fork.id,
+    key: state.key,
+    title: state.fork.prompt,
+    status: state.fork.status,
+    cursorTheme: state.fork.cursorTheme,
+    cursorId: state.fork.cursorId,
+    sessionId: state.fork.cuaSessionId,
+    windowId: state.fork.windowId,
+    selected: state.key === activeWorkspaceKey,
+  }));
+  sendToUi({ type: "forkSessions", sessions });
+}
+
 function snapshot(state = workspace()) {
   if (state.key !== activeWorkspaceKey) {
     return;
   }
   sendToUi({ type: "snapshot", events: state.entries, workspaceKey: state.key });
   emitWorkspace();
+  emitForkSessions();
 }
 
 function appendEntry(state, kind, title, body = "", id = "", metadata = {}) {
@@ -355,8 +493,9 @@ function commandList(state = workspace()) {
 
 function setActiveWorkspace(key, title = key) {
   const nextKey = String(key || "workspace:default");
-  if (nextKey !== activeWorkspaceKey) {
-    cleanupCuaCursors(workspace(activeWorkspaceKey), "workspace-deactivate");
+  const previous = workspace(activeWorkspaceKey);
+  if (nextKey !== activeWorkspaceKey && !previous.fork) {
+    cleanupCuaCursors(previous, "workspace-deactivate");
   }
   const state = workspace(nextKey);
   updateWorkspaceMetadata(state, nextKey, title || state.title || nextKey);
@@ -418,6 +557,103 @@ function resetWorkspaceSession(state = workspace(), createImmediately = initiali
   }
 }
 
+function generateForkId() {
+  return `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function chooseCursorTheme() {
+  const themes = listCursorThemes();
+  if (!Array.isArray(themes) || themes.length === 0) {
+    return "Tiri-CUA";
+  }
+  return themes[Math.floor(Math.random() * themes.length)] || "Tiri-CUA";
+}
+
+function forkWorkspaceTitle(prompt) {
+  const trimmed = String(prompt || "").trim().replace(/\s+/g, " ");
+  return trimmed.length > 36 ? `${trimmed.slice(0, 35)}...` : (trimmed || "Fork cursor");
+}
+
+function startForkCursor(message) {
+  const prompt = String(message.text || "").trim();
+  if (!prompt) {
+    return;
+  }
+
+  const id = generateForkId();
+  const cuaSessionId = id.replace(/^fork-/, "fork_").replace(/[^A-Za-z0-9_-]/g, "_");
+  const cursorId = `tic-cua-mcp-${cuaSessionId}`;
+  const cursorTheme = chooseCursorTheme();
+  let anchor;
+  try {
+    anchor = createForkVirtualCursor({ cursorId, cursorTheme, activeWindow: message.activeWindow || null });
+  } catch (err) {
+    sendToUi({
+      type: "forkComplete",
+      status: "error",
+      title: "Fork cursor failed",
+      body: err?.message || String(err),
+    });
+    return;
+  }
+
+  const state = workspace(`fork:${id}`);
+  updateWorkspaceMetadata(state, `fork:${id}`, forkWorkspaceTitle(prompt));
+  state.fork = {
+    id,
+    prompt,
+    status: "running",
+    sourceWorkspaceKey: message.workspaceKey || activeWorkspaceKey,
+    sourceWorkspaceTitle: message.workspaceTitle || activeWorkspaceTitle,
+    cuaSessionId,
+    cursorId,
+    cursorTheme,
+    windowId: Number(anchor.window_id || anchor.windowId || anchor.cursor?.window_id || 0),
+    anchor,
+    activeWindow: message.activeWindow || null,
+  };
+  state.cuaCursorIds.add(cursorId);
+  forkSessions.set(id, state);
+  activeWorkspaceKey = state.key;
+  activeWorkspaceTitle = state.title;
+  appendEntry(state, "user", "You", prompt);
+  state.pendingPrompts.push(prompt);
+  emitForkSessions();
+  if (!state.sessionId && initialized) {
+    newSession(state);
+  } else {
+    flushPrompts(state);
+  }
+}
+
+function selectFork(id) {
+  const state = forkSessions.get(id);
+  if (!state) {
+    return;
+  }
+  activeWorkspaceKey = state.key;
+  activeWorkspaceTitle = state.title;
+  snapshot(state);
+  status(state.promptBusy ? "thinking" : (state.sessionReady ? "ready" : state.fork.status));
+  emitForkSessions();
+}
+
+function finishFork(state, statusText, body = "") {
+  if (!state?.fork || state.fork.status === "done" || state.fork.status === "error") {
+    return;
+  }
+  state.fork.status = statusText;
+  cleanupCuaCursors(state, `fork-${statusText}`);
+  emitForkSessions();
+  sendToUi({
+    type: "forkComplete",
+    status: statusText,
+    title: statusText === "done" ? "Fork cursor complete" : "Fork cursor failed",
+    body: body || state.fork.prompt,
+    forkId: state.fork.id,
+  });
+}
+
 function newSession(state = workspace()) {
   if (!initialized) {
     return;
@@ -469,6 +705,12 @@ function cuaMcpServer(state = workspace()) {
   if (state.workspaceId) {
     env.push({ name: "CUA_WORKSPACE_ID", value: state.workspaceId });
   }
+  if (state.fork?.cuaSessionId) {
+    env.push({ name: "CUA_SESSION_ID", value: state.fork.cuaSessionId });
+  }
+  if (state.fork?.cursorTheme) {
+    env.push({ name: "CUA_CURSOR_THEME", value: state.fork.cursorTheme });
+  }
 
   return {
     name: "cua",
@@ -508,6 +750,18 @@ function prepareWorkspaceRoot(state) {
 function agentInstructions(state) {
   const workspaceLabel = state.workspaceId || state.title || state.key;
   const workspaceReference = state.workspaceId || "(current focused workspace)";
+  const fork = state.fork ? `
+Forked cursor session:
+- Task: ${state.fork.prompt}
+- Associated window id: ${state.fork.windowId || "(unknown)"}
+- Associated window title: ${state.fork.activeWindow?.title || "(unknown)"}
+- Associated app id: ${state.fork.activeWindow?.appId || "(unknown)"}
+- CUA session id: ${state.fork.cuaSessionId}
+- Virtual cursor id: ${state.fork.cursorId}
+- Cursor theme: ${state.fork.cursorTheme}
+
+For all mouse actions in this task, pass session_id "${state.fork.cuaSessionId}" when the tool accepts it. The same virtual cursor was pre-created at the user's cursor position, so do not start a second mouse session. When the task is complete, call close-session with session_id "${state.fork.cuaSessionId}".
+` : "";
   return `# Codex Workspace ${workspaceLabel}
 
 You are running from a generated tic-shell ad-hoc workspace folder.
@@ -516,6 +770,7 @@ Current niri workspace:
 - Key: ${state.key}
 - Title: ${state.title}
 - Numeric workspace id/index: ${workspaceReference}
+${fork}
 
 The \`cua\` MCP server is attached to this Codex session for computer-use actions.
 Use the MCP tools exposed by that server. Do not run the legacy \`cua ...\` shell CLI unless an MCP tool is unavailable or fails.
@@ -526,6 +781,7 @@ Useful MCP tools:
 - \`describe-workspace\` returns window metadata and can include an efficient composite workspace screenshot. Use it to discover window ids, and set \`include_screenshots=true\` when a visual workspace overview would help.
 - \`click\` clicks inside a window at window-relative screenshot/image pixel coordinates. It returns a \`session_id\`; pass the same \`session_id\` on later mouse calls for the same task so the painted virtual cursor is reused.
 - \`type-text\` types into a window.
+- \`press-key\` presses one named key in a window, for example \`Enter\`, \`Tab\`, \`Escape\`, \`Backspace\`, \`Delete\`, or \`ArrowLeft\`.
 - \`scroll\` scrolls in a window, with optional coordinates in window-relative screenshot/image pixels. Reuse the same \`session_id\` from prior mouse calls when continuing the same task.
 - \`close-session\` closes a mouse session and destroys its painted virtual cursor.
 
@@ -639,6 +895,9 @@ function flushPrompts(state = workspace()) {
   }, result => {
     state.promptBusy = false;
     clearThinking(state);
+    if (state.fork) {
+      finishFork(state, "done", state.fork.prompt);
+    }
     if (state.key === activeWorkspaceKey) {
       status("ready");
     }
@@ -738,7 +997,7 @@ function toolNameFrom(update) {
   }
 
   const title = String(update.title || update.fields?.title || "").toLowerCase();
-  for (const name of ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll", "close-session"]) {
+  for (const name of ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "press-key", "scroll", "close-session"]) {
     if (title.includes(name)) {
       return name;
     }
@@ -749,7 +1008,7 @@ function toolNameFrom(update) {
 function toolMetadata(update) {
   const toolName = toolNameFrom(update).replace(/_/g, "-").toLowerCase();
   const title = String(update.title || update.fields?.title || "").toLowerCase();
-  const isCua = ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "scroll", "close-session"].includes(toolName)
+  const isCua = ["describe-workspace", "view-window", "screenshot-window", "click", "type-text", "press-key", "scroll", "close-session"].includes(toolName)
     || title.includes("describe-workspace")
     || title.includes("view-window")
     || title.includes("cua");
@@ -1021,6 +1280,9 @@ function handleAgentMessage(message) {
         const state = request.state || workspace();
         state.promptBusy = false;
         clearThinking(state);
+        if (state.fork) {
+          finishFork(state, "error", message.error.message || "prompt failed");
+        }
         status(state.sessionReady ? "ready" : "error");
         flushPrompts(state);
       }
@@ -1051,6 +1313,10 @@ function handleClientInput(line) {
     const message = JSON.parse(trimmed);
     if (message.type === "prompt") {
       queuePrompt(message.text, message.workspaceKey || activeWorkspaceKey, message.workspaceTitle || activeWorkspaceTitle);
+    } else if (message.type === "fork-cursor") {
+      startForkCursor(message);
+    } else if (message.type === "select-fork") {
+      selectFork(message.id);
     } else if (message.type === "workspace") {
       setActiveWorkspace(message.workspaceKey, message.workspaceTitle);
     } else if (message.type === "clear" || message.type === "new") {
@@ -1072,11 +1338,15 @@ function handleClientInput(line) {
 
 function handleExit(code, signal) {
   for (const state of workspaces.values()) {
+    if (state.fork && state.fork.status === "running") {
+      state.fork.status = "error";
+    }
     cleanupCuaCursors(state, "agent-exit");
     state.sessionReady = false;
     state.promptBusy = false;
     clearThinking(state);
   }
+  emitForkSessions();
   status("stopped");
 }
 

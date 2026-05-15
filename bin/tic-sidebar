@@ -83,8 +83,11 @@ case "$action" in
   hide-agent)
     exec "$qscmd" ipc -p "$config_path" call sidebar hideAgent
     ;;
+  fork-cursor)
+    exec "$qscmd" ipc -p "$config_path" call sidebar forkCursor
+    ;;
   *)
-    echo "usage: tic-sidebar [start|stop|toggle|show|hide|toggle-agent|show-agent|hide-agent|ipc ...]" >&2
+    echo "usage: tic-sidebar [start|stop|toggle|show|hide|toggle-agent|show-agent|hide-agent|fork-cursor|ipc ...]" >&2
     exit 64
     ;;
 esac

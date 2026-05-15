@@ -24,6 +24,8 @@ const VIRTUAL_CURSOR_THEME: &str = "Tiri-CUA";
 const VIRTUAL_CURSOR_ICON: &str = "left_ptr";
 const VIRTUAL_CURSOR_SIZE: u16 = 32;
 const VIRTUAL_CURSOR_MOVE_MS: u32 = 120;
+const CUA_SESSION_ID_ENV: &str = "CUA_SESSION_ID";
+const CUA_CURSOR_THEME_ENV: &str = "CUA_CURSOR_THEME";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -58,6 +60,7 @@ enum Commands {
     },
     #[command(alias = "type")]
     TypeText { window_id: u64, text: String },
+    PressKey { window_id: u64, key: String },
     Scroll {
         window_id: u64,
         direction: ScrollDirection,
@@ -113,6 +116,14 @@ struct TypeTextParams {
     window_id: u64,
     /// Text to type into the window.
     text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PressKeyParams {
+    /// The numeric niri window id to send the key press to.
+    window_id: u64,
+    /// Key to press, for example Enter, Tab, Escape, Backspace, Delete, ArrowLeft, ArrowRight, ArrowUp, or ArrowDown.
+    key: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -256,7 +267,12 @@ impl CuaSession {
     fn new(session_id: Option<String>) -> Result<Self> {
         let (session_id, generated) = match session_id {
             Some(session_id) => (normalize_session_id(session_id)?, false),
-            None => (generate_session_id()?, true),
+            None => match env::var(CUA_SESSION_ID_ENV) {
+                Ok(session_id) if !session_id.trim().is_empty() => {
+                    (normalize_session_id(session_id)?, false)
+                }
+                _ => (generate_session_id()?, true),
+            },
         };
         let cursor_id = format!("{VIRTUAL_CURSOR_ID_PREFIX}-{session_id}");
         Ok(Self {
@@ -334,6 +350,10 @@ fn main() -> Result<()> {
             print_json(
                 &serde_json::json!({ "window_id": window_id, "typed_chars": text.chars().count() }),
             )?;
+        }
+        Commands::PressKey { window_id, key } => {
+            niri.cua_press_key(window_id, &key)?;
+            print_json(&serde_json::json!({ "window_id": window_id, "pressed_key": key }))?;
         }
         Commands::Scroll {
             window_id,
@@ -420,6 +440,14 @@ impl CuaMcpServer {
     #[tool(name = "type-text", description = "Type text into a window.")]
     fn type_text(&self, Parameters(params): Parameters<TypeTextParams>) -> CallToolResult {
         self.type_text_inner(params).unwrap_or_else(tool_error)
+    }
+
+    #[tool(
+        name = "press-key",
+        description = "Press one named key in a window, for example Enter, Tab, Escape, Backspace, Delete, or ArrowLeft."
+    )]
+    fn press_key(&self, Parameters(params): Parameters<PressKeyParams>) -> CallToolResult {
+        self.press_key_inner(params).unwrap_or_else(tool_error)
     }
 
     #[tool(
@@ -513,6 +541,18 @@ impl CuaMcpServer {
             serde_json::json!({
                 "window_id": params.window_id,
                 "typed_chars": params.text.chars().count()
+            })
+            .to_string(),
+        )]))
+    }
+
+    fn press_key_inner(&self, params: PressKeyParams) -> Result<CallToolResult> {
+        let niri = Niri::discover()?;
+        niri.cua_press_key(params.window_id, &params.key)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "window_id": params.window_id,
+                "pressed_key": params.key
             })
             .to_string(),
         )]))
@@ -923,6 +963,7 @@ impl Niri {
         let x = x.to_string();
         let y = y.to_string();
         let window_id = window_id.to_string();
+        let cursor_theme = virtual_cursor_theme();
 
         let update = self.msg([
             "update-virtual-cursor",
@@ -935,7 +976,7 @@ impl Niri {
             "--y",
             &y,
             "--cursor-theme",
-            VIRTUAL_CURSOR_THEME,
+            cursor_theme.as_str(),
             "--cursor-icon",
             VIRTUAL_CURSOR_ICON,
             "--size",
@@ -962,7 +1003,7 @@ impl Niri {
             "--y",
             &y,
             "--cursor-theme",
-            VIRTUAL_CURSOR_THEME,
+            cursor_theme.as_str(),
             "--cursor-icon",
             VIRTUAL_CURSOR_ICON,
             "--size",
@@ -1020,6 +1061,17 @@ impl Niri {
             &window_id.to_string(),
             "--text",
             text,
+        ])
+    }
+
+    fn cua_press_key(&self, window_id: u64, key: &str) -> Result<()> {
+        self.msg([
+            "action",
+            "cua-press-key",
+            "--id",
+            &window_id.to_string(),
+            "--key",
+            key,
         ])
     }
 
@@ -1159,6 +1211,14 @@ fn normalize_session_id(session_id: String) -> Result<String> {
         ));
     }
     Ok(session_id.to_owned())
+}
+
+fn virtual_cursor_theme() -> String {
+    env::var(CUA_CURSOR_THEME_ENV)
+        .ok()
+        .map(|theme| theme.trim().to_owned())
+        .filter(|theme| !theme.is_empty())
+        .unwrap_or_else(|| VIRTUAL_CURSOR_THEME.to_owned())
 }
 
 impl EnvDefaults {

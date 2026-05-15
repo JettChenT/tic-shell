@@ -174,6 +174,29 @@ test("cua image tool calls include metadata for the shell renderer", () => {
   assert.equal(entry.metadata.image.source, "data:image/png;base64,iVBORw0KGgo=");
 });
 
+test("deactivate destroys tracked CUA virtual cursors for the workspace", () => {
+  const destroyed = [];
+  const { client } = makeClient({ destroyVirtualCursor: cursorId => destroyed.push(cursorId) });
+
+  client.handleAgentMessage({
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-click",
+        title: "click",
+        status: "completed",
+        content: [{ type: "text", text: JSON.stringify({ session_id: "task-1", virtual_cursor: "tic-cua-mcp-task-1" }) }],
+      },
+    },
+  });
+
+  client.handleClientInput(JSON.stringify({ type: "deactivate" }));
+  client.handleClientInput(JSON.stringify({ type: "deactivate" }));
+
+  assert.deepEqual(destroyed, ["tic-cua-mcp-task-1"]);
+});
+
 test("echoed user chunks are ignored when prompt was already added locally", () => {
   const { client, messages } = makeClient();
 
@@ -254,6 +277,8 @@ test("workspace setup creates per-workspace AGENTS instructions", async () => {
     assert.match(agentsMd, /Do not run the legacy `cua \.\.\.` shell CLI/);
     assert.match(agentsMd, /`view-window` captures a single window/);
     assert.match(agentsMd, /`describe-workspace` returns window metadata and can include an efficient composite workspace screenshot/);
+    assert.match(agentsMd, /`press-key` presses one named key in a window/);
+    assert.match(agentsMd, /`Enter`/);
     assert.match(agentsMd, /include_screenshots=true/);
     assert.match(agentsMd, /window-relative screenshot\/image pixel coordinates/);
     assert.match(agentsMd, /Do not call `describe-workspace` as a reflex/);
@@ -262,6 +287,49 @@ test("workspace setup creates per-workspace AGENTS instructions", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("fork cursor sessions prebind CUA session and cursor theme", async () => {
+  const destroyed = [];
+  const { client, messages, writes } = makeClient({
+    listCursorThemes: () => ["Tiri-CUA-Pink"],
+    createForkVirtualCursor: ({ cursorId, cursorTheme, activeWindow }) => ({
+      window_id: 42,
+      x: 12,
+      y: 24,
+      cursor: { cursor_id: cursorId, window_id: 42, x: 12, y: 24 },
+      cursorTheme,
+      activeWindow,
+    }),
+    destroyVirtualCursor: cursorId => destroyed.push(cursorId),
+  });
+
+  client.initialize();
+  client.handleAgentMessage({ id: writes[0].id, result: { agentInfo: { title: "Codex ACP" } } });
+  client.handleClientInput(JSON.stringify({
+    type: "fork-cursor",
+    text: "click the button",
+    workspaceKey: "niri:workspace:7",
+    workspaceTitle: "7",
+    activeWindow: { id: 42, title: "Target", appId: "app.target" },
+  }));
+  const sessionNew = respondTo(writes, client, "session/new", { sessionId: "fork-session" });
+  const agentsMd = await readFile(path.join(sessionNew.params.cwd, "AGENTS.md"), "utf8");
+
+  assert.match(agentsMd, /Forked cursor session:/);
+  assert.match(agentsMd, /Associated window id: 42/);
+  assert.match(agentsMd, /Associated window title: Target/);
+  assert.match(agentsMd, /Cursor theme: Tiri-CUA-Pink/);
+  assert.match(agentsMd, /For all mouse actions in this task, pass session_id/);
+
+  const forkEnv = sessionNew.params.mcpServers[0].env;
+  assert.equal(forkEnv.find(item => item.name === "CUA_CURSOR_THEME")?.value, "Tiri-CUA-Pink");
+  assert.match(forkEnv.find(item => item.name === "CUA_SESSION_ID")?.value || "", /^fork_/);
+  assert.equal(messages.some(message => message.type === "forkSessions" && message.sessions.length === 1), true);
+
+  respondTo(writes, client, "session/prompt", { stopReason: "end_turn" });
+  assert.equal(destroyed.length, 1);
+});
+
 
 test("workspace sessions use distinct ad-hoc folders as cwd", () => {
   const root = path.join(testRoot, "session-cwds");
