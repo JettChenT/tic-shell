@@ -12,45 +12,54 @@ Repo-specific instructions for future coding agents working in `tic-shell`.
 - `cua/` is a standalone Rust package for niri computer-use actions.
 - `crates/` contains the older Rust/GPUI direction and shared Rust work. Treat it as secondary unless the task explicitly targets it.
 
-## Nix Development
+## Local Commands
 
-Use the repo dev shell for local commands. It provides Quickshell, niri, Bun, Rust, Just, and the native libraries needed by the Rust/GPUI crates.
+Prefer the repo `Justfile` when it has a recipe for the task. The recipes encode local defaults such as the installed Noctalia Quickshell binary path.
+
+Cargo commands usually work directly on this machine without `nix develop`; verify before adding a Nix wrapper. As of 2026-05-15, both of these pass from the repo root without `nix develop`:
+
+```sh
+cargo check --workspace
+cargo check --manifest-path cua/Cargo.toml
+```
+
+Avoid wrapping sidebar/Quickshell commands in raw `nix develop -c ...` by default. The dev shell takes `quickshell` from the `noctalia-qs` flake input, so entering it for sidebar work may try to build Quickshell from source, and raw `nix develop` may still not put the expected `qs` on `PATH` for the running shell workflow. Use the Justfile recipes, which set `TIC_QUICKSHELL_BIN` to `~/.local/share/tic-shell/noctalia-qs/bin/qs` unless the environment overrides it.
 
 Preferred one-shot commands from the repo root:
 
 ```sh
-nix develop -c just build
-nix develop -c just check
-nix develop -c just test-agent
-nix develop -c just sidebar
-nix develop -c just stop-sidebar
+just build
+just check
+just test-agent
+just sidebar
+just stop-sidebar
 ```
 
 Equivalent direct commands:
 
 ```sh
-nix develop -c cargo build --workspace
-nix develop -c cargo check --workspace
-nix develop -c bun test tests/tic-codex-agent.test.mjs
-nix develop -c ./bin/tic-sidebar start
-nix develop -c ./bin/tic-sidebar stop
+cargo build --workspace
+cargo check --workspace
+bun test tests/tic-codex-agent.test.mjs
+TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-$HOME/.local/share/tic-shell/noctalia-qs/bin/qs}" ./bin/tic-sidebar start
+TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-$HOME/.local/share/tic-shell/noctalia-qs/bin/qs}" ./bin/tic-sidebar stop
 ```
 
 Runtime sidebar controls:
 
 ```sh
-nix develop -c ./bin/tic-sidebar toggle
-nix develop -c ./bin/tic-sidebar show
-nix develop -c ./bin/tic-sidebar hide
-nix develop -c ./bin/tic-sidebar toggle-agent
-nix develop -c ./bin/tic-sidebar show-agent
-nix develop -c ./bin/tic-sidebar hide-agent
+just toggle-sidebar
+just show-sidebar
+just hide-sidebar
+just toggle-agent
+TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-$HOME/.local/share/tic-shell/noctalia-qs/bin/qs}" ./bin/tic-sidebar show-agent
+TIC_QUICKSHELL_BIN="${TIC_QUICKSHELL_BIN:-$HOME/.local/share/tic-shell/noctalia-qs/bin/qs}" ./bin/tic-sidebar hide-agent
 ```
 
 Useful live checks in a niri session:
 
 ```sh
-nix develop -c qs list --all
+$HOME/.local/share/tic-shell/noctalia-qs/bin/qs list --all
 niri msg layers
 niri msg --json workspaces
 niri msg --json windows
@@ -87,15 +96,15 @@ niri msg --json windows
 
 ## Rust `cua` Notes
 
-- The package lives under `cua/`; use `nix develop -c cargo check --manifest-path cua/Cargo.toml` from the repo root.
+- The package lives under `cua/`; use `cargo check --manifest-path cua/Cargo.toml` from the repo root.
 - The CLI depends on live niri IPC and may require `NIRI_SOCKET`, `XDG_RUNTIME_DIR`, and `WAYLAND_DISPLAY` outside a normal session.
 - Non-intrusive screenshots should be preferred. `--intrusive-fallback` may focus windows and use `grim`.
 - Input actions use `uinput`; failures may be environment or permission related rather than logic bugs.
 
 ## Verification
 
-- For Noctalia/sidebar changes, run the relevant `nix develop -c ./bin/tic-sidebar ...` command and verify with `niri msg layers`.
-- For Bun bridge changes, run `nix develop -c just test-agent`.
-- For Rust CLI changes, run `nix develop -c cargo check --manifest-path cua/Cargo.toml`.
-- For Rust workspace changes, run `nix develop -c just check` or `nix develop -c just build`.
+- For Noctalia/sidebar changes, run the relevant `just ...` sidebar recipe when available and verify with `niri msg layers`.
+- For Bun bridge changes, run `just test-agent`.
+- For Rust CLI changes, run `cargo check --manifest-path cua/Cargo.toml`.
+- For Rust workspace changes, run `just check` or `just build`.
 - If a check cannot run because the environment lacks niri, Quickshell, or input permissions, report that explicitly.
